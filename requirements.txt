@@ -1,0 +1,5 @@
+flask>=3.0
+watchdog>=4.0
+# Windows에서만 필요 (실제 프로세스 모니터링용)
+WMI>=1.5.1; sys_platform == 'win32'
+pywin32>=306; sys_platform == 'win32'

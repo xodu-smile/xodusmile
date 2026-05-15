@@ -1,0 +1,444 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>RANSOM-DETECTOR :: telemetry</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;700&family=Major+Mono+Display&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg:        #0e0d0b;
+    --bg-2:      #16140f;
+    --bg-3:      #1d1a14;
+    --line:      #2a2520;
+    --ink:       #e8dfc9;
+    --ink-dim:   #8a7f68;
+    --ink-faint: #4a4438;
+    --accent:    #d97a3c;     /* burnt orange */
+    --warn:      #e8b339;
+    --crit:      #e0413e;
+    --ok:        #6b8a52;
+    --med:       #c69b4e;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  html, body {
+    background: var(--bg);
+    color: var(--ink);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 13px;
+    line-height: 1.5;
+    min-height: 100vh;
+  }
+
+  body {
+    background-image:
+      repeating-linear-gradient(0deg,
+        transparent 0px, transparent 2px,
+        rgba(255,255,255,0.012) 2px, rgba(255,255,255,0.012) 3px);
+    padding: 24px;
+  }
+
+  .top-bar {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    border-bottom: 1px solid var(--line);
+    padding-bottom: 16px;
+    margin-bottom: 24px;
+  }
+
+  .brand {
+    font-family: 'Major Mono Display', monospace;
+    font-size: 22px;
+    letter-spacing: 0.18em;
+    color: var(--ink);
+  }
+  .brand .dot { color: var(--accent); }
+
+  .meta {
+    color: var(--ink-dim);
+    font-size: 11px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+  }
+  .meta .live::before {
+    content: '●';
+    color: var(--ok);
+    margin-right: 6px;
+    animation: pulse 2s infinite;
+  }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.3; }
+  }
+
+  /* ---- Threat panel ---- */
+  .grid {
+    display: grid;
+    grid-template-columns: 1fr 1.6fr;
+    gap: 24px;
+  }
+  @media (max-width: 900px) {
+    .grid { grid-template-columns: 1fr; }
+  }
+
+  .panel {
+    background: var(--bg-2);
+    border: 1px solid var(--line);
+    padding: 20px;
+  }
+
+  .panel-head {
+    font-size: 10px;
+    letter-spacing: 0.25em;
+    text-transform: uppercase;
+    color: var(--ink-dim);
+    margin-bottom: 16px;
+    display: flex;
+    justify-content: space-between;
+  }
+  .panel-head .corner {
+    color: var(--accent);
+  }
+
+  .threat-level {
+    font-family: 'Major Mono Display', monospace;
+    font-size: 56px;
+    letter-spacing: 0.05em;
+    line-height: 1;
+    margin: 8px 0 12px;
+    transition: color 0.3s;
+  }
+  .threat-level[data-level="INFO"]     { color: var(--ink); }
+  .threat-level[data-level="LOW"]      { color: var(--ok); }
+  .threat-level[data-level="MEDIUM"]   { color: var(--med); }
+  .threat-level[data-level="HIGH"]     { color: var(--warn); }
+  .threat-level[data-level="CRITICAL"] {
+    color: var(--crit);
+    animation: alarm 1.2s infinite;
+  }
+  @keyframes alarm {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.55; }
+  }
+
+  .score-row {
+    display: flex;
+    align-items: baseline;
+    gap: 12px;
+    margin-bottom: 20px;
+  }
+  .score-num {
+    font-size: 28px;
+    color: var(--accent);
+  }
+  .score-lbl {
+    color: var(--ink-dim);
+    font-size: 10px;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+  }
+
+  .score-bar {
+    height: 4px;
+    background: var(--bg-3);
+    position: relative;
+    overflow: hidden;
+    margin-bottom: 24px;
+  }
+  .score-bar > div {
+    height: 100%;
+    background: linear-gradient(90deg,
+      var(--ok) 0%, var(--med) 35%, var(--warn) 60%, var(--crit) 100%);
+    transition: width 0.4s ease;
+  }
+  .threshold-marks {
+    display: flex;
+    justify-content: space-between;
+    font-size: 9px;
+    color: var(--ink-faint);
+    margin-top: 4px;
+    letter-spacing: 0.1em;
+  }
+
+  .stats-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+    gap: 1px;
+    background: var(--line);
+    border: 1px solid var(--line);
+    margin-top: 16px;
+  }
+  .stat {
+    background: var(--bg-2);
+    padding: 14px 12px;
+  }
+  .stat-num {
+    font-size: 22px;
+    color: var(--accent);
+  }
+  .stat-lbl {
+    font-size: 9px;
+    color: var(--ink-dim);
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    margin-top: 4px;
+  }
+
+  /* ---- Event log ---- */
+  .events {
+    max-height: 70vh;
+    overflow-y: auto;
+  }
+  .events::-webkit-scrollbar { width: 6px; }
+  .events::-webkit-scrollbar-track { background: var(--bg-2); }
+  .events::-webkit-scrollbar-thumb { background: var(--line); }
+
+  .event {
+    border-left: 2px solid var(--ink-faint);
+    padding: 10px 14px;
+    margin-bottom: 8px;
+    background: var(--bg-3);
+    font-size: 12px;
+    transition: border-color 0.2s;
+    animation: slide-in 0.3s ease;
+  }
+  @keyframes slide-in {
+    from { opacity: 0; transform: translateX(-8px); }
+    to   { opacity: 1; transform: translateX(0); }
+  }
+  .event[data-sev="CRITICAL"] { border-left-color: var(--crit); }
+  .event[data-sev="HIGH"]     { border-left-color: var(--warn); }
+  .event[data-sev="MEDIUM"]   { border-left-color: var(--med); }
+  .event[data-sev="LOW"]      { border-left-color: var(--ok); }
+
+  .event-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 4px;
+  }
+  .event-tag {
+    color: var(--accent);
+    font-size: 10px;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+  }
+  .event-time {
+    color: var(--ink-faint);
+    font-size: 10px;
+  }
+  .event-msg {
+    color: var(--ink);
+  }
+  .event-meta {
+    color: var(--ink-dim);
+    font-size: 10px;
+    margin-top: 4px;
+    word-break: break-all;
+  }
+  .event-meta .k { color: var(--ink-faint); }
+
+  .empty {
+    color: var(--ink-faint);
+    text-align: center;
+    padding: 40px;
+    font-size: 11px;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+  }
+
+  .actions {
+    margin-top: 20px;
+    display: flex;
+    gap: 8px;
+  }
+  .btn {
+    background: transparent;
+    border: 1px solid var(--line);
+    color: var(--ink-dim);
+    padding: 8px 14px;
+    font-family: inherit;
+    font-size: 11px;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+  .btn:hover {
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+
+  /* footer */
+  .footer {
+    margin-top: 40px;
+    padding-top: 16px;
+    border-top: 1px solid var(--line);
+    color: var(--ink-faint);
+    font-size: 10px;
+    letter-spacing: 0.1em;
+    display: flex;
+    justify-content: space-between;
+  }
+</style>
+</head>
+<body>
+
+<div class="top-bar">
+  <div>
+    <div class="brand">RANSOM<span class="dot">·</span>DETECTOR</div>
+    <div class="meta">prototype · multi-signal correlation engine</div>
+  </div>
+  <div class="meta"><span class="live">live telemetry</span> · <span id="now">--:--:--</span></div>
+</div>
+
+<div class="grid">
+
+  <!-- LEFT: Threat panel -->
+  <div>
+    <div class="panel">
+      <div class="panel-head">
+        <span>threat assessment</span>
+        <span class="corner">[01]</span>
+      </div>
+
+      <div class="threat-level" id="level" data-level="INFO">INFO</div>
+
+      <div class="score-row">
+        <div class="score-num" id="score">0</div>
+        <div class="score-lbl">cumulative weight · 120s window</div>
+      </div>
+
+      <div class="score-bar"><div id="score-fill" style="width: 0%;"></div></div>
+      <div class="threshold-marks">
+        <span>0</span><span>30·LOW</span><span>60·MED</span>
+        <span>100·HIGH</span><span>150·CRIT</span>
+      </div>
+
+      <div class="actions">
+        <button class="btn" id="reset-btn">reset score</button>
+      </div>
+    </div>
+
+    <div class="panel" style="margin-top: 20px;">
+      <div class="panel-head">
+        <span>signal stats</span>
+        <span class="corner">[02]</span>
+      </div>
+      <div class="stats-grid" id="stats"></div>
+    </div>
+  </div>
+
+  <!-- RIGHT: Event log -->
+  <div class="panel">
+    <div class="panel-head">
+      <span>event stream</span>
+      <span class="corner">[03]</span>
+    </div>
+    <div class="events" id="events">
+      <div class="empty">awaiting signals</div>
+    </div>
+  </div>
+
+</div>
+
+<div class="footer">
+  <span>// detectors: canary · mass_io · process_cmdline</span>
+  <span>refresh: 1500ms</span>
+</div>
+
+<script>
+  const elLevel = document.getElementById('level');
+  const elScore = document.getElementById('score');
+  const elFill  = document.getElementById('score-fill');
+  const elEvents = document.getElementById('events');
+  const elStats = document.getElementById('stats');
+  const elNow   = document.getElementById('now');
+  const btnReset = document.getElementById('reset-btn');
+
+  const MAX_SCORE_VIS = 200;
+
+  function fmtTime(ts) {
+    const d = new Date(ts * 1000);
+    return d.toTimeString().slice(0,8);
+  }
+
+  function escape(s) {
+    return String(s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+
+  function renderEvents(events) {
+    if (!events.length) {
+      elEvents.innerHTML = '<div class="empty">awaiting signals</div>';
+      return;
+    }
+    elEvents.innerHTML = events.map(e => {
+      const meta = Object.entries(e.metadata || {})
+        .map(([k,v]) => `<span class="k">${escape(k)}=</span>${escape(v)}`)
+        .join(' · ');
+      return `
+        <div class="event" data-sev="${escape(e.severity)}">
+          <div class="event-head">
+            <span class="event-tag">${escape(e.detector)} / ${escape(e.name)}
+              · w=${e.weight}</span>
+            <span class="event-time">${fmtTime(e.timestamp)}</span>
+          </div>
+          <div class="event-msg">${escape(e.message)}</div>
+          ${meta ? `<div class="event-meta">${meta}</div>` : ''}
+        </div>`;
+    }).join('');
+  }
+
+  function renderStats(stats) {
+    const cells = [];
+    cells.push(`<div class="stat">
+      <div class="stat-num">${stats.total || 0}</div>
+      <div class="stat-lbl">total signals</div></div>`);
+    for (const [k, v] of Object.entries(stats.by_detector || {})) {
+      cells.push(`<div class="stat">
+        <div class="stat-num">${v}</div>
+        <div class="stat-lbl">${escape(k)}</div></div>`);
+    }
+    elStats.innerHTML = cells.join('') ||
+      '<div class="stat"><div class="stat-num">0</div>' +
+      '<div class="stat-lbl">no data</div></div>';
+  }
+
+  async function tick() {
+    elNow.textContent = new Date().toTimeString().slice(0,8);
+    try {
+      const [statusRes, eventsRes] = await Promise.all([
+        fetch('/api/status'), fetch('/api/events')
+      ]);
+      const status = await statusRes.json();
+      const evts = (await eventsRes.json()).events;
+
+      elLevel.textContent = status.level;
+      elLevel.dataset.level = status.level;
+      elScore.textContent = status.score;
+      const pct = Math.min(100, (status.score / MAX_SCORE_VIS) * 100);
+      elFill.style.width = pct + '%';
+
+      renderEvents(evts);
+      renderStats(status.stats);
+    } catch (e) {
+      // 네트워크 실패는 조용히
+    }
+  }
+
+  btnReset.addEventListener('click', async () => {
+    await fetch('/api/reset', { method: 'POST' });
+    tick();
+  });
+
+  tick();
+  setInterval(tick, 1500);
+</script>
+</body>
+</html>
