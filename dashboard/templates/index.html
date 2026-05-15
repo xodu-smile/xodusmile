@@ -274,6 +274,70 @@
     color: var(--accent);
   }
 
+  /* ---- process table ---- */
+  .proc-panel { margin-top: 24px; }
+  .proc-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 11px;
+  }
+  .proc-table th {
+    text-align: left;
+    color: var(--ink-dim);
+    font-weight: 400;
+    font-size: 9px;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    border-bottom: 1px solid var(--line);
+    padding: 8px 10px;
+  }
+  .proc-table td {
+    padding: 6px 10px;
+    border-bottom: 1px solid var(--bg-3);
+    color: var(--ink);
+    vertical-align: top;
+  }
+  .proc-table tr.new td { animation: flash 1.2s ease; }
+  @keyframes flash {
+    0%   { background: rgba(217, 122, 60, 0.18); }
+    100% { background: transparent; }
+  }
+  .proc-table td.num { color: var(--ink-dim); font-variant-numeric: tabular-nums; }
+  .proc-table td.name { color: var(--accent); }
+  .proc-table td.cmd {
+    color: var(--ink-dim);
+    font-size: 10px;
+    max-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .proc-table td.cmd:hover { white-space: normal; word-break: break-all; }
+  .proc-controls {
+    display: flex;
+    gap: 14px;
+    align-items: center;
+    margin-bottom: 12px;
+    font-size: 10px;
+    color: var(--ink-dim);
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+  }
+  .proc-controls input[type="text"] {
+    background: var(--bg-3);
+    border: 1px solid var(--line);
+    color: var(--ink);
+    padding: 6px 10px;
+    font-family: inherit;
+    font-size: 11px;
+    min-width: 180px;
+  }
+  .proc-controls .count { color: var(--accent); }
+  .proc-wrap { max-height: 360px; overflow-y: auto; }
+  .proc-wrap::-webkit-scrollbar { width: 6px; }
+  .proc-wrap::-webkit-scrollbar-track { background: var(--bg-2); }
+  .proc-wrap::-webkit-scrollbar-thumb { background: var(--line); }
+
   /* footer */
   .footer {
     margin-top: 40px;
@@ -347,9 +411,39 @@
 
 </div>
 
+<div class="panel proc-panel">
+  <div class="panel-head">
+    <span>live processes</span>
+    <span class="corner">[04]</span>
+  </div>
+  <div class="proc-controls">
+    <span>filter</span>
+    <input type="text" id="proc-filter" placeholder="name or cmdline" autocomplete="off">
+    <span>tracked · <span class="count" id="proc-count">0</span></span>
+  </div>
+  <div class="proc-wrap">
+    <table class="proc-table">
+      <thead>
+        <tr>
+          <th style="width: 60px;">pid</th>
+          <th style="width: 60px;">ppid</th>
+          <th style="width: 160px;">name</th>
+          <th style="width: 90px;">user</th>
+          <th style="width: 60px;">cpu</th>
+          <th style="width: 70px;">rss·mb</th>
+          <th>cmdline</th>
+        </tr>
+      </thead>
+      <tbody id="proc-body">
+        <tr><td colspan="7" class="cmd" style="color:var(--ink-faint); text-align:center; padding:24px;">collecting…</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
 <div class="footer">
-  <span>// detectors: canary · mass_io · process_cmdline</span>
-  <span>refresh: 1500ms</span>
+  <span>// detectors: canary · mass_io · process_cmdline · process_watcher</span>
+  <span>refresh: 1500ms · proc: 2000ms</span>
 </div>
 
 <script>
@@ -439,6 +533,62 @@
 
   tick();
   setInterval(tick, 1500);
+
+  // --- live process panel -------------------------------------------------
+  const procBody  = document.getElementById('proc-body');
+  const procCount = document.getElementById('proc-count');
+  const procFilter = document.getElementById('proc-filter');
+  const knownPids = new Set();
+  let firstProcTick = true;
+  let filterStr = '';
+
+  procFilter.addEventListener('input', e => {
+    filterStr = e.target.value.toLowerCase();
+    renderProcs(window.__lastProcs || []);
+  });
+
+  function renderProcs(procs) {
+    window.__lastProcs = procs;
+    procCount.textContent = procs.length;
+    const filtered = filterStr
+      ? procs.filter(p => (p.name || '').toLowerCase().includes(filterStr)
+                       || (p.cmdline || '').toLowerCase().includes(filterStr))
+      : procs;
+    if (!filtered.length) {
+      procBody.innerHTML = '<tr><td colspan="7" class="cmd" '
+        + 'style="color:var(--ink-faint); text-align:center; padding:24px;">'
+        + (filterStr ? 'no matches' : 'no processes') + '</td></tr>';
+      return;
+    }
+    procBody.innerHTML = filtered.map(p => {
+      const isNew = !firstProcTick && !knownPids.has(p.pid);
+      return `<tr class="${isNew ? 'new' : ''}">
+        <td class="num">${p.pid}</td>
+        <td class="num">${p.ppid}</td>
+        <td class="name">${escape(p.name || '?')}</td>
+        <td>${escape(p.user || '')}</td>
+        <td class="num">${p.cpu_percent.toFixed(1)}</td>
+        <td class="num">${p.rss_mb.toFixed(1)}</td>
+        <td class="cmd" title="${escape(p.cmdline || '')}">${escape(p.cmdline || '')}</td>
+      </tr>`;
+    }).join('');
+  }
+
+  async function procTick() {
+    try {
+      const res = await fetch('/api/processes');
+      const data = await res.json();
+      const procs = data.processes || [];
+      renderProcs(procs);
+      // refresh known-pid set after render so first tick doesn't all flash
+      const next = new Set(procs.map(p => p.pid));
+      knownPids.clear();
+      next.forEach(p => knownPids.add(p));
+      firstProcTick = false;
+    } catch (e) { /* silent */ }
+  }
+  procTick();
+  setInterval(procTick, 2000);
 </script>
 </body>
 </html>

@@ -1,24 +1,25 @@
 """
-Process Command Line Detector
------------------------------
-보고서 2.3 (VSS 삭제) + 2.9 (BCD 조작) 통합.
+Process Command Line Detector (Windows 11)
+------------------------------------------
+보고서 2.3 (VSS 삭제) + 2.9 (BCD 조작) 통합. 본 프로토타입은 Windows 11 전용.
 
 원리: 새 프로세스가 생성될 때마다 그 커맨드라인을 정규식으로 검사.
 Pre-encryption 시그널이라 매우 가치가 높다 (보고서 5.2).
 
 구현:
-  - Windows: WMI ExecNotificationQuery로 Win32_ProcessStartTrace 구독
-  - 비-Windows: 데모 모드 — 시뮬레이터가 직접 시그널 주입 가능
+  - WMI ExecNotificationQuery 로 Win32_Process 생성 이벤트 구독
+  - psutil 기반 ProcessWatcher 와 RULES 를 공유 (evaluate_cmdline)
 
-화이트리스트 (보고서 3.1):
-  - 정상 백업 솔루션 / IT 운영 도구는 단독 발생만으로는 차단하지 않고
-    다른 시그널과 결합 시에만 가중치 부여 — 이 프로토타입에서는
-    가중치를 낮게 잡아서 같은 효과를 낸다 (단일 시그널로는 임계값 미달).
+룰셋은 Win11 환경 가정:
+  - VSS / Volume Shadow Copy 조작
+  - BCD 부트 설정 변조
+  - Microsoft Defender / SmartScreen 무력화
+  - wevtutil / fsutil / cipher 기반 anti-forensics
+  - schtasks / Run 키 지속화
+  - 난독화된 PowerShell 실행 패턴
 """
 
-import platform
 import re
-import threading
 from dataclasses import dataclass
 from typing import List, Optional, Pattern
 
@@ -97,49 +98,182 @@ RULES: List[Rule] = [
         message="BCD modification: ignore boot failures",
     ),
 
-    # --- 보너스: 일반 보안 무력화 ---
+    # --- Microsoft Defender 무력화 (Win11 MITRE T1562.001) ---
     Rule(
-        name="defender_disable",
+        name="defender_disable_realtime",
         pattern=_rx(
             r"set-mppreference.*-disablerealtimemonitoring\s+\$?true"
-            r"|sc(\.exe)?\s+(stop|delete)\s+(windefend|sense|wdnissvc)"
+            r"|sc(\.exe)?\s+(stop|delete|config)\s+(windefend|sense|wdnissvc|wdfilter)"
+        ),
+        weight=55,
+        severity=Severity.HIGH,
+        message="Microsoft Defender realtime protection disablement",
+    ),
+    Rule(
+        name="defender_add_exclusion",
+        pattern=_rx(
+            r"add-mppreference\s+.*-exclusion(path|extension|process)"
         ),
         weight=45,
         severity=Severity.HIGH,
-        message="Windows Defender disablement attempt",
+        message="Microsoft Defender exclusion added (pre-encryption staging)",
+    ),
+    Rule(
+        name="defender_disable_via_registry",
+        pattern=_rx(
+            r"reg(\.exe)?\s+add\s+.*\\Windows\s+Defender\b.*"
+            r"(disableantispyware|disablerealtimemonitoring|disablebehaviormonitoring)"
+        ),
+        weight=55,
+        severity=Severity.HIGH,
+        message="Microsoft Defender disabled via registry edit",
+    ),
+    Rule(
+        name="smartscreen_disable",
+        pattern=_rx(
+            r"set-mppreference\s+.*-puaprotection\s+0"
+            r"|reg(\.exe)?\s+add\s+.*\\System\b.*EnableSmartScreen.*\s+0"
+        ),
+        weight=35,
+        severity=Severity.MEDIUM,
+        message="SmartScreen / PUA protection disabled",
+    ),
+
+    # --- 로그/포렌식 인공물 삭제 (Win11) ---
+    Rule(
+        name="wevtutil_clear_log",
+        pattern=_rx(r"wevtutil(\.exe)?\s+(cl|clear-log)\s+\S+"),
+        weight=55,
+        severity=Severity.HIGH,
+        message="Windows event log cleared (wevtutil)",
+    ),
+    Rule(
+        name="powershell_clear_eventlog",
+        pattern=_rx(
+            r"(clear-eventlog|remove-eventlog|clear-winevent|clear-eventlogfile)"
+        ),
+        weight=55,
+        severity=Severity.HIGH,
+        message="Windows event log cleared (PowerShell)",
+    ),
+    Rule(
+        name="fsutil_usn_delete",
+        pattern=_rx(r"fsutil(\.exe)?\s+usn\s+deletejournal"),
+        weight=60,
+        severity=Severity.HIGH,
+        message="NTFS USN journal deleted (anti-forensics)",
+    ),
+    Rule(
+        name="cipher_wipe_free_space",
+        pattern=_rx(r"\bcipher(\.exe)?\s+/w(:|\s)"),
+        weight=55,
+        severity=Severity.HIGH,
+        message="cipher /w used to wipe free space (anti-recovery)",
+    ),
+
+    # --- 복구/방어 인프라 차단 ---
+    Rule(
+        name="netsh_firewall_off",
+        pattern=_rx(
+            r"netsh(\.exe)?\s+advfirewall\s+set\s+(allprofiles|domainprofile|"
+            r"privateprofile|publicprofile)\s+state\s+off"
+        ),
+        weight=45,
+        severity=Severity.HIGH,
+        message="Windows Firewall turned off (netsh)",
+    ),
+    Rule(
+        name="bitlocker_disable",
+        pattern=_rx(
+            r"(manage-bde(\.exe)?\s+-off|disable-bitlocker)\b"
+        ),
+        weight=50,
+        severity=Severity.HIGH,
+        message="BitLocker disablement (pre-encryption staging)",
+    ),
+
+    # --- 지속화 (T1053.005 schtasks, T1547.001 Run keys) ---
+    Rule(
+        name="schtasks_persistence",
+        pattern=_rx(
+            r"schtasks(\.exe)?\s+/create\b.*"
+            r"/sc\s+(onlogon|onstart|onidle|minute)\b.*"
+            r"/(rl|ru)\s+\S*system"
+        ),
+        weight=35,
+        severity=Severity.MEDIUM,
+        message="Scheduled task created with SYSTEM/auto-trigger (persistence)",
+    ),
+    Rule(
+        name="run_key_persistence",
+        pattern=_rx(
+            r"reg(\.exe)?\s+add\s+.*\\Microsoft\\Windows\\CurrentVersion\\"
+            r"Run(Once)?\b"
+        ),
+        weight=30,
+        severity=Severity.MEDIUM,
+        message="Run/RunOnce registry key written (persistence)",
+    ),
+
+    # --- 의심스러운 PowerShell 호출 패턴 ---
+    Rule(
+        name="powershell_obfuscated_exec",
+        pattern=_rx(
+            r"powershell(\.exe)?\b.*"
+            r"-(enc(odedcommand)?|e)\b\s+[A-Za-z0-9+/=]{40,}"
+        ),
+        weight=40,
+        severity=Severity.HIGH,
+        message="PowerShell encoded command (likely obfuscation)",
+    ),
+    Rule(
+        name="powershell_downloader",
+        pattern=_rx(
+            r"powershell(\.exe)?\b.*"
+            r"(invoke-webrequest|iwr|invoke-restmethod|irm|"
+            r"\(new-object\s+net\.webclient\)\.downloadstring|"
+            r"net\.webclient\)\.downloadfile)"
+        ),
+        weight=35,
+        severity=Severity.MEDIUM,
+        message="PowerShell in-memory downloader (stager pattern)",
+    ),
+    Rule(
+        name="powershell_bypass_policy",
+        pattern=_rx(
+            r"powershell(\.exe)?\b.*-ex(ecutionpolicy)?\s+bypass\b.*"
+            r"-(w|windowstyle)\s+hidden"
+        ),
+        weight=30,
+        severity=Severity.MEDIUM,
+        message="PowerShell ExecutionPolicy bypass + hidden window",
     ),
 ]
 
 
 class ProcessCmdlineDetector(Detector):
+    """WMI ExecNotificationQuery 기반 프로세스 생성 감시기 (Windows 11 전용)."""
+
     name = "process_cmdline"
 
     def __init__(self, engine):
         super().__init__(engine)
-        self._is_windows = platform.system() == "Windows"
         self._wmi_conn = None
 
     def submit_external(self, process_name: str, cmdline: str,
                         pid: Optional[int] = None,
                         ppid: Optional[int] = None) -> None:
-        """
-        외부에서 (예: 테스트 시뮬레이터, 또는 다른 OS의 프로세스 모니터에서)
-        프로세스 생성 이벤트를 주입할 수 있는 진입점.
-        """
+        """테스트 시뮬레이터가 가짜 이벤트를 주입하기 위한 진입점."""
         self._evaluate(process_name, cmdline, pid, ppid)
 
     def run(self) -> None:
-        if not self._is_windows:
-            print(f"[{self.name}] non-Windows OS — running in passive mode "
-                  f"(accept submit_external() only)")
-            self._stop_event.wait()
-            return
-
         try:
             import wmi  # type: ignore
             import pythoncom  # type: ignore
         except ImportError:
-            print(f"[{self.name}] wmi / pywin32 not installed — passive mode")
+            print(f"[{self.name}] wmi / pywin32 not installed — "
+                  f"this build targets Windows 11. Install requirements.txt "
+                  f"on Windows.")
             self._stop_event.wait()
             return
 
@@ -147,7 +281,7 @@ class ProcessCmdlineDetector(Detector):
         try:
             self._wmi_conn = wmi.WMI()
             watcher = self._wmi_conn.Win32_Process.watch_for("creation")
-            print(f"[{self.name}] WMI process watcher started")
+            print(f"[{self.name}] WMI Win32_Process watcher started")
             while not self._stop_event.is_set():
                 try:
                     proc = watcher(timeout_ms=1000)
@@ -167,20 +301,34 @@ class ProcessCmdlineDetector(Detector):
 
     def _evaluate(self, process_name: str, cmdline: str,
                   pid: Optional[int], ppid: Optional[int]) -> None:
-        if not cmdline:
-            return
-        for rule in RULES:
-            if rule.pattern.search(cmdline):
-                self.emit(Signal(
-                    detector=self.name,
-                    name=rule.name,
-                    weight=rule.weight,
-                    severity=rule.severity,
-                    message=rule.message,
-                    metadata={
-                        "process": process_name,
-                        "cmdline": cmdline[:512],
-                        "pid": pid,
-                        "ppid": ppid,
-                    },
-                ))
+        for sig in evaluate_cmdline(self.name, process_name, cmdline, pid, ppid):
+            self.emit(sig)
+
+
+def evaluate_cmdline(detector_name: str, process_name: str, cmdline: str,
+                     pid: Optional[int] = None,
+                     ppid: Optional[int] = None) -> List[Signal]:
+    """Run every rule against a cmdline and produce signals.
+
+    Shared with ProcessWatcher so both Windows-WMI and psutil polling
+    paths apply identical detection logic.
+    """
+    if not cmdline:
+        return []
+    out: List[Signal] = []
+    for rule in RULES:
+        if rule.pattern.search(cmdline):
+            out.append(Signal(
+                detector=detector_name,
+                name=rule.name,
+                weight=rule.weight,
+                severity=rule.severity,
+                message=rule.message,
+                metadata={
+                    "process": process_name,
+                    "cmdline": cmdline[:512],
+                    "pid": pid,
+                    "ppid": ppid,
+                },
+            ))
+    return out

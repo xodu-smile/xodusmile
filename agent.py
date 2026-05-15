@@ -18,6 +18,7 @@ from event_store import EventStore
 from detectors.canary import CanaryDetector
 from detectors.mass_io import MassIODetector
 from detectors.process_cmdline import ProcessCmdlineDetector
+from detectors.process_watcher import ProcessWatcher
 
 
 class Agent:
@@ -29,8 +30,9 @@ class Agent:
         self.canary = CanaryDetector(self.engine, watch_dirs)
         self.mass_io = MassIODetector(self.engine, watch_dirs)
         self.proc = ProcessCmdlineDetector(self.engine)
+        self.watcher = ProcessWatcher(self.engine)
 
-        self.detectors = [self.canary, self.mass_io, self.proc]
+        self.detectors = [self.canary, self.mass_io, self.proc, self.watcher]
 
     def _on_signal(self, sig: Signal, score: int, level: Severity) -> None:
         # 콘솔 알림
@@ -77,6 +79,10 @@ class Agent:
             "recent_signals": [s.to_dict() for s in self.engine.recent_signals(20)],
             "stats": self.store.stats(),
         }
+
+    def processes(self, limit: int = 50) -> list:
+        """대시보드 용 — 실시간 프로세스 스냅샷."""
+        return self.watcher.snapshot(limit=limit)
 
 
 def parse_args():

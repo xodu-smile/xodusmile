@@ -24,6 +24,10 @@ def create_app(agent):
     def api_events():
         return jsonify({"events": agent.store.recent(100)})
 
+    @app.route("/api/processes")
+    def api_processes():
+        return jsonify({"processes": agent.processes(limit=60)})
+
     @app.route("/api/reset", methods=["POST"])
     def api_reset():
         agent.engine.reset()
