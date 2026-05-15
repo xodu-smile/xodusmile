@@ -1,0 +1,90 @@
+;;;
+;;; RmDetectorFlt
+;;;
+;;; Ransomware Detection Minifilter (PoC).
+;;; Altitude 385201 is in the FSFilter Activity Monitor range
+;;; (370000-389998). For a shipping product request a unique
+;;; altitude from Microsoft.
+;;;
+
+[Version]
+Signature   = "$Windows NT$"
+Class       = "ActivityMonitor"
+ClassGuid   = {b86dff51-a31e-4bac-b3cf-e8cfe75c9fc2}
+Provider    = %ProviderString%
+DriverVer   = 05/15/2026,1.0.0.0
+CatalogFile = RmDetectorFlt.cat
+PnpLockdown = 1
+
+[DestinationDirs]
+DefaultDestDir          = 13
+RmDetectorFlt.DriverFiles = 13
+
+;;
+;; Default install sections
+;;
+
+[DefaultInstall.NTamd64]
+OptionDesc          = %ServiceDescription%
+CopyFiles           = RmDetectorFlt.DriverFiles
+
+[DefaultInstall.NTamd64.Services]
+AddService          = %ServiceName%,,RmDetectorFlt.Service
+
+[DefaultUninstall.NTamd64]
+LegacyUninstall     = 1
+DelFiles            = RmDetectorFlt.DriverFiles
+
+[DefaultUninstall.NTamd64.Services]
+DelService          = %ServiceName%,0x200
+
+;;
+;; Service install section
+;;
+
+[RmDetectorFlt.Service]
+DisplayName     = %ServiceName%
+Description     = %ServiceDescription%
+ServiceBinary   = %13%\RmDetectorFlt.sys
+Dependencies    = FltMgr
+ServiceType     = 2                         ;; SERVICE_FILE_SYSTEM_DRIVER
+StartType       = 3                         ;; SERVICE_DEMAND_START
+ErrorControl    = 1                         ;; SERVICE_ERROR_NORMAL
+LoadOrderGroup  = "FSFilter Activity Monitor"
+AddReg          = RmDetectorFlt.AddRegistry
+
+;;
+;; Registry entries: Instances/Altitude/Flags
+;;
+
+[RmDetectorFlt.AddRegistry]
+HKR,,"DebugFlags",0x00010001,0x0
+HKR,,"SupportedFeatures",0x00010001,0x3
+HKR,"Instances","DefaultInstance",0x00000000,%DefaultInstance%
+HKR,"Instances\"%DefaultInstance%,"Altitude",0x00000000,%Altitude%
+HKR,"Instances\"%DefaultInstance%,"Flags",0x00010001,0x0
+
+;;
+;; Source file lists
+;;
+
+[SourceDisksFiles]
+RmDetectorFlt.sys = 1,,
+
+[SourceDisksNames]
+1 = %DiskId1%,,,
+
+[RmDetectorFlt.DriverFiles]
+RmDetectorFlt.sys
+
+;;
+;; Strings
+;;
+
+[Strings]
+ProviderString      = "RansomwareDetector PoC"
+ServiceName         = "RmDetectorFlt"
+ServiceDescription  = "Ransomware Detection Minifilter (PoC)"
+DefaultInstance     = "RmDetectorFlt Instance"
+Altitude            = "385201"
+DiskId1             = "RmDetectorFlt Installation Disk"

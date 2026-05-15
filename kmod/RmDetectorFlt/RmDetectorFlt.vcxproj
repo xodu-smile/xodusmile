@@ -1,0 +1,98 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|x64">
+      <Configuration>Debug</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+
+  <PropertyGroup Label="Globals">
+    <ProjectGuid>{B5F11D1A-1B0A-4F4F-8E5D-5A8B6F3A1D11}</ProjectGuid>
+    <TemplateGuid>{497e31cb-056b-4f31-abb8-447fd55ee5a5}</TemplateGuid>
+    <TargetFrameworkVersion>v4.5</TargetFrameworkVersion>
+    <MinimumVisualStudioVersion>14.0</MinimumVisualStudioVersion>
+    <Configuration>Debug</Configuration>
+    <Platform Condition="'$(Platform)' == ''">x64</Platform>
+    <RootNamespace>RmDetectorFlt</RootNamespace>
+    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+  </PropertyGroup>
+
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
+    <TargetVersion>Windows10</TargetVersion>
+    <UseDebugLibraries>True</UseDebugLibraries>
+    <DriverType>WDM</DriverType>
+    <ConfigurationType>Driver</ConfigurationType>
+    <PlatformToolset>WindowsKernelModeDriver10.0</PlatformToolset>
+    <Driver_SpectreMitigation>Spectre</Driver_SpectreMitigation>
+    <Driver_TargetType>Driver</Driver_TargetType>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
+    <TargetVersion>Windows10</TargetVersion>
+    <UseDebugLibraries>False</UseDebugLibraries>
+    <DriverType>WDM</DriverType>
+    <ConfigurationType>Driver</ConfigurationType>
+    <PlatformToolset>WindowsKernelModeDriver10.0</PlatformToolset>
+    <Driver_SpectreMitigation>Spectre</Driver_SpectreMitigation>
+    <Driver_TargetType>Driver</Driver_TargetType>
+  </PropertyGroup>
+
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+
+  <ImportGroup Label="ExtensionSettings" />
+  <ImportGroup Label="PropertySheets">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props"
+            Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')"
+            Label="LocalAppDataPlatform" />
+  </ImportGroup>
+
+  <PropertyGroup Label="UserMacros" />
+
+  <PropertyGroup>
+    <OutDir>$(SolutionDir)$(Platform)\$(Configuration)\</OutDir>
+    <IntDir>$(Platform)\$(Configuration)\</IntDir>
+    <TargetName>RmDetectorFlt</TargetName>
+    <DriverType>FSMiniFilter</DriverType>
+    <SignMode Condition="'$(Configuration)'=='Release'">Off</SignMode>
+    <SignMode Condition="'$(Configuration)'=='Debug'">TestSign</SignMode>
+    <DeployFiles>$(OutDir)RmDetectorFlt.sys;$(OutDir)RmDetectorFlt.inf</DeployFiles>
+  </PropertyGroup>
+
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <WarningLevel>Level4</WarningLevel>
+      <TreatWarningAsError>true</TreatWarningAsError>
+      <PreprocessorDefinitions>_KERNEL_MODE;POOL_NX_OPTIN=1;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>$(IntDir);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
+    <Link>
+      <AdditionalDependencies>$(DDK_LIB_PATH)\fltmgr.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+    <Inf>
+      <TimeStamp>05/15/2026,1.0.0.0</TimeStamp>
+    </Inf>
+  </ItemDefinitionGroup>
+
+  <ItemGroup>
+    <ClCompile Include="RmDetectorFlt.c" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="RmDetectorFlt.h" />
+    <ClInclude Include="resource.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <ResourceCompile Include="RmDetectorFlt.rc" />
+  </ItemGroup>
+  <ItemGroup>
+    <Inf Include="RmDetectorFlt.inf" />
+  </ItemGroup>
+
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <ImportGroup Label="ExtensionTargets" />
+</Project>

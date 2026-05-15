@@ -2,8 +2,12 @@
 Ransomware Detection Agent
 --------------------------
 모든 탐지기를 조립하고 백그라운드로 실행한다.
-대시보드(Flask)와 같은 프로세스에서 실행될 수도 있고
-독립 실행 가능하다.
+대시보드(Flask)와 같은 프로세스에서 실행될 수도 있고 독립 실행 가능하다.
+
+커널 minifilter (RmDetectorFlt) 가 로드되어 있으면 EDR 모드로 동작한다:
+프로세스 트리/이미지 로드/엔트로피 스파이크/in-kernel 점수/자동 종료
+이벤트를 받아 ScoringEngine 에 합산하고, 커널이 직접 ZwTerminateProcess
+까지 호출한다. 드라이버가 없을 때는 user-mode 와치독으로 폴백한다.
 """
 
 import argparse
@@ -17,8 +21,14 @@ from scoring import ScoringEngine, Signal, Severity
 from event_store import EventStore
 from detectors.canary import CanaryDetector
 from detectors.mass_io import MassIODetector
+from detectors.minifilter import MinifilterDetector
 from detectors.process_cmdline import ProcessCmdlineDetector
 from detectors.process_watcher import ProcessWatcher
+
+
+# PID block escalation: trip when the scoring engine first crosses
+# CRITICAL. The driver gets a one-shot block command per PID.
+BLOCK_PID_AT_LEVEL = Severity.CRITICAL
 
 
 class Agent:
@@ -29,10 +39,13 @@ class Agent:
 
         self.canary = CanaryDetector(self.engine, watch_dirs)
         self.mass_io = MassIODetector(self.engine, watch_dirs)
+        self.minifilter = MinifilterDetector(self.engine, watch_dirs)
         self.proc = ProcessCmdlineDetector(self.engine)
         self.watcher = ProcessWatcher(self.engine)
 
-        self.detectors = [self.canary, self.mass_io, self.proc, self.watcher]
+        self.detectors = [self.canary, self.mass_io, self.minifilter,
+                          self.proc, self.watcher]
+        self._blocked_pids: set[int] = set()
 
     def _on_signal(self, sig: Signal, score: int, level: Severity) -> None:
         # 콘솔 알림
@@ -41,6 +54,22 @@ class Agent:
               f"(weight={sig.weight}, total_score={score}, level={level.value})")
         # 영속화
         self.store.record(sig, score, level)
+        # 커널이 이미 죽인 PID 는 차단 큐에 더 넣지 않는다
+        if sig.name == "auto_terminated":
+            pid = sig.metadata.get("pid")
+            if isinstance(pid, int):
+                self._blocked_pids.add(pid)
+            return
+        # PID 차단 에스컬레이션 (CRITICAL 진입 + PID 알려진 경우)
+        if (level == BLOCK_PID_AT_LEVEL
+                and self.minifilter.connected):
+            pid = sig.metadata.get("pid")
+            if isinstance(pid, int) and pid > 0 and pid not in self._blocked_pids:
+                self._blocked_pids.add(pid)
+                ok = self.minifilter.block_pid(pid)
+                marker = "blocked" if ok else "block-failed"
+                print(f"[agent] {marker} pid={pid} via minifilter "
+                      f"(triggered by {sig.detector}/{sig.name})")
 
     @staticmethod
     def _severity_bar(level: Severity) -> str:
@@ -56,10 +85,23 @@ class Agent:
         print("=" * 60)
         print("  Ransomware Detection Agent — prototype")
         print("=" * 60)
-        # canary 먼저 배치
-        self.canary.deploy()
+        # canary 먼저 배치 -> 그 경로를 그대로 minifilter 에 알려준다
+        canary_files = self.canary.deploy()
+        self.minifilter.canary_paths = [str(p) for p in canary_files]
         for d in self.detectors:
             d.start()
+        # 짧은 윈도우 동안 minifilter 가 커널 포트에 붙기를 기다린다
+        for _ in range(20):
+            if self.minifilter.connected:
+                break
+            time.sleep(0.1)
+        if self.minifilter.connected:
+            print(f"[agent] RmDetectorFlt ACTIVE — EDR mode "
+                  f"(process tree + image load + entropy guard + susp-ext "
+                  f"rename guard + auto-terminate)")
+        else:
+            print(f"[agent] RmDetectorFlt inactive (driver not loaded) — "
+                  f"user-mode watchers only (no in-kernel kill)")
         print(f"[agent] {len(self.detectors)} detectors started")
 
     def stop(self) -> None:
