@@ -386,6 +386,8 @@
 
       <div class="actions">
         <button class="btn" id="reset-btn">reset score</button>
+        <button class="btn" id="report-btn"
+                title="download a markdown event report">report · md</button>
       </div>
     </div>
 
@@ -454,6 +456,7 @@
   const elStats = document.getElementById('stats');
   const elNow   = document.getElementById('now');
   const btnReset = document.getElementById('reset-btn');
+  const btnReport = document.getElementById('report-btn');
 
   const MAX_SCORE_VIS = 200;
 
@@ -529,6 +532,36 @@
   btnReset.addEventListener('click', async () => {
     await fetch('/api/reset', { method: 'POST' });
     tick();
+  });
+
+  btnReport.addEventListener('click', async () => {
+    const original = btnReport.textContent;
+    btnReport.disabled = true;
+    btnReport.textContent = 'building…';
+    let failed = false;
+    try {
+      const res = await fetch('/api/report');
+      if (!res.ok) throw new Error('http ' + res.status);
+      const blob = await res.blob();
+      let filename = 'ransom-detector-report.md';
+      const cd = res.headers.get('Content-Disposition') || '';
+      const m = cd.match(/filename="([^"]+)"/);
+      if (m) filename = m[1];
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (e) {
+      failed = true;
+      btnReport.textContent = 'error';
+      setTimeout(() => { btnReport.textContent = original; }, 1500);
+    } finally {
+      btnReport.disabled = false;
+      if (!failed) btnReport.textContent = original;
+    }
   });
 
   tick();
