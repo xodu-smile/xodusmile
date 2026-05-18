@@ -27,7 +27,7 @@
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
     <TargetVersion>Windows10</TargetVersion>
     <UseDebugLibraries>True</UseDebugLibraries>
-    <DriverType>WDM</DriverType>
+    <DriverType>FSMiniFilter</DriverType>
     <ConfigurationType>Driver</ConfigurationType>
     <PlatformToolset>WindowsKernelModeDriver10.0</PlatformToolset>
     <Driver_SpectreMitigation>Spectre</Driver_SpectreMitigation>
@@ -36,7 +36,7 @@
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
     <TargetVersion>Windows10</TargetVersion>
     <UseDebugLibraries>False</UseDebugLibraries>
-    <DriverType>WDM</DriverType>
+    <DriverType>FSMiniFilter</DriverType>
     <ConfigurationType>Driver</ConfigurationType>
     <PlatformToolset>WindowsKernelModeDriver10.0</PlatformToolset>
     <Driver_SpectreMitigation>Spectre</Driver_SpectreMitigation>
@@ -55,12 +55,20 @@
   <PropertyGroup Label="UserMacros" />
 
   <PropertyGroup>
-    <OutDir>$(SolutionDir)$(Platform)\$(Configuration)\</OutDir>
-    <IntDir>$(Platform)\$(Configuration)\</IntDir>
+    <!--
+      Pin OutDir to <kmod>\x64\<Configuration>\ regardless of whether MSBuild
+      is invoked via a .sln (SolutionDir set) or directly against this vcxproj
+      (SolutionDir falls back to the project dir). build.ps1 stages from the
+      same path. IntDir stays project-local to keep obj files out of OutDir.
+    -->
+    <OutDir>$(MSBuildThisFileDirectory)..\x64\$(Configuration)\</OutDir>
+    <IntDir>$(MSBuildThisFileDirectory)$(Platform)\$(Configuration)\</IntDir>
     <TargetName>RmDetectorFlt</TargetName>
-    <DriverType>FSMiniFilter</DriverType>
-    <SignMode Condition="'$(Configuration)'=='Release'">Off</SignMode>
-    <SignMode Condition="'$(Configuration)'=='Debug'">TestSign</SignMode>
+    <!--
+      Driver signing is handled out-of-band by build.ps1 (test-signed sys +
+      inf2cat + cat). MSBuild itself must not try to sign during the build.
+    -->
+    <SignMode>Off</SignMode>
     <DeployFiles>$(OutDir)RmDetectorFlt.sys;$(OutDir)RmDetectorFlt.inf</DeployFiles>
   </PropertyGroup>
 

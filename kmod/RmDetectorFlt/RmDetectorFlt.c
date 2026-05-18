@@ -110,7 +110,7 @@ typedef struct _RM_GLOBALS
     WCHAR               SuspExts[RM_MAX_SUSP_EXTS][RM_MAX_EXT_CHARS];
 
     /* Tunable thresholds (also guarded by ConfigLock for the writer side;
-     * readers do a relaxed load — these are ULONGs and the impact of a
+     * readers do a relaxed load -- these are ULONGs and the impact of a
      * torn read is benign). */
     ULONG               ScoreCritical;
     ULONG               EntropyThreshold;   /* x100 */
@@ -645,7 +645,7 @@ RmTerminateWorker(_In_ PDEVICE_OBJECT DeviceObject, _In_opt_ PVOID Context)
 
     status = ZwOpenProcess(&hProc, PROCESS_TERMINATE, &oa, &cid);
     if (NT_SUCCESS(status)) {
-        /* STATUS_UNSUCCESSFUL == 0xC0000001 — visible to Event Viewer as
+        /* STATUS_UNSUCCESSFUL == 0xC0000001 -- visible to Event Viewer as
          * the termination reason without needing ntstatus.h here. */
         ZwTerminateProcess(hProc, STATUS_UNSUCCESSFUL);
         ZwClose(hProc);
@@ -690,7 +690,7 @@ RmQueueTerminate(_In_ ULONG Pid)
 static ULONG
 RmPidApplyScore(
     _In_ ULONG Pid, _In_ ULONG Delta,
-    _In_opt_ PCUNICODE_STRING Path, _In_ RM_EVENT_TYPE TriggerType)
+    _In_opt_ PCUNICODE_STRING Path)
 {
     KIRQL irql;
     PRM_PID_CTX slot;
@@ -728,7 +728,6 @@ RmPidApplyScore(
     if (queueTerm) {
         RmQueueTerminate(Pid);
     }
-    (VOID)TriggerType;
     return newScore;
 }
 
@@ -802,11 +801,6 @@ RmGetNormalizedPath(
         FLT_FILE_NAME_NORMALIZED | FLT_FILE_NAME_QUERY_DEFAULT, &fni);
     if (!NT_SUCCESS(status)) return status;
 
-    status = FltParseFileNameInformation(fni);
-    if (!NT_SUCCESS(status)) {
-        FltReleaseFileNameInformation(fni);
-        return status;
-    }
     status = RmCopyDowncasedPath(
         fni->Name.Buffer, fni->Name.Length / sizeof(WCHAR), Out, Buffer);
     FltReleaseFileNameInformation(fni);
@@ -855,7 +849,10 @@ RmPostCreate(
 
     createOpts    = Data->Iopb->Parameters.Create.Options;
     disposition   = (createOpts >> 24) & 0x000000ff;
-    desiredAccess = Data->Iopb->Parameters.Create.SecurityContext->DesiredAccess;
+    /* SecurityContext can be NULL for some kernel-initiated opens. */
+    desiredAccess = (Data->Iopb->Parameters.Create.SecurityContext != NULL)
+        ? Data->Iopb->Parameters.Create.SecurityContext->DesiredAccess
+        : 0;
 
     if (disposition == FILE_CREATE || disposition == FILE_SUPERSEDE ||
         disposition == FILE_OVERWRITE || disposition == FILE_OVERWRITE_IF) {
@@ -962,7 +959,7 @@ RmPreWrite(
         RmEventDecorateWithPid(&evt, pid);
         RmSendEvent(&evt);
         if (evt.EventType == RmEventBlockedCanary) {
-            RmPidApplyScore(pid, RM_SCORE_CANARY_BLOCK, &ctx->FullPath, RmEventBlockedCanary);
+            RmPidApplyScore(pid, RM_SCORE_CANARY_BLOCK, &ctx->FullPath);
         }
         FltReleaseContext(ctx);
         Data->IoStatus.Status = STATUS_ACCESS_DENIED;
@@ -1036,7 +1033,7 @@ RmPreWrite(
         }
 
         if (scoreDelta > 0) {
-            RmPidApplyScore(pid, scoreDelta, &ctx->FullPath, RmEventEntropySpike);
+            RmPidApplyScore(pid, scoreDelta, &ctx->FullPath);
         }
     }
 
@@ -1066,6 +1063,9 @@ RmPreSetInformation(
     UNREFERENCED_PARAMETER(CompletionContext);
 
     infoClass = Data->Iopb->Parameters.SetFileInformation.FileInformationClass;
+    if (Data->Iopb->Parameters.SetFileInformation.InfoBuffer == NULL) {
+        return FLT_PREOP_SUCCESS_NO_CALLBACK;
+    }
 
     if (infoClass == FileRenameInformation || infoClass == FileRenameInformationEx) {
         isRename = TRUE;
@@ -1101,9 +1101,12 @@ RmPreSetInformation(
     }
 
     if (isRename) {
+        ULONG fnameBytes;
         rename = (PFILE_RENAME_INFORMATION)Data->Iopb->Parameters.SetFileInformation.InfoBuffer;
+        fnameBytes = rename->FileNameLength;
+        if (fnameBytes > MAXUSHORT) fnameBytes = MAXUSHORT & ~1u;
         newName.Buffer = rename->FileName;
-        newName.Length = (USHORT)rename->FileNameLength;
+        newName.Length = (USHORT)fnameBytes;
         newName.MaximumLength = newName.Length;
 
         if ((g_Data.Policy & RM_POLICY_BLOCK_SUSP_EXT) && ctx->IsWatched) {
@@ -1131,9 +1134,9 @@ RmPreSetInformation(
     RmSendEvent(&evt);
 
     if (suspExtHit) {
-        RmPidApplyScore(pid, RM_SCORE_SUSP_EXT_RENAME, &ctx->FullPath, RmEventBlockedSuspExt);
+        RmPidApplyScore(pid, RM_SCORE_SUSP_EXT_RENAME, &ctx->FullPath);
     } else if (block) {
-        RmPidApplyScore(pid, RM_SCORE_CANARY_BLOCK, &ctx->FullPath, RmEventBlockedCanary);
+        RmPidApplyScore(pid, RM_SCORE_CANARY_BLOCK, &ctx->FullPath);
     }
     FltReleaseContext(ctx);
 
@@ -1320,12 +1323,16 @@ RmPortConnect(
     _In_ ULONG SizeOfContext,
     _Outptr_result_maybenull_ PVOID *ConnectionPortCookie)
 {
+    PVOID prev;
+
     UNREFERENCED_PARAMETER(ServerPortCookie);
     UNREFERENCED_PARAMETER(ConnectionContext);
     UNREFERENCED_PARAMETER(SizeOfContext);
 
-    if (g_Data.ClientPort != NULL) return STATUS_ALREADY_REGISTERED;
-    g_Data.ClientPort = ClientPort;
+    prev = InterlockedCompareExchangePointer((PVOID volatile *)&g_Data.ClientPort,
+                                             ClientPort, NULL);
+    if (prev != NULL) return STATUS_ALREADY_REGISTERED;
+
     g_Data.Connected = TRUE;
     *ConnectionPortCookie = NULL;
     RM_DBG("user-mode client connected");
@@ -1336,13 +1343,16 @@ VOID
 RmPortDisconnect(_In_opt_ PVOID ConnectionCookie)
 {
     KIRQL irql;
+    PFLT_PORT port;
+
     UNREFERENCED_PARAMETER(ConnectionCookie);
 
     RM_DBG("user-mode client disconnected");
     g_Data.Connected = FALSE;
-    if (g_Data.ClientPort != NULL) {
-        FltCloseClientPort(g_Data.Filter, &g_Data.ClientPort);
-        g_Data.ClientPort = NULL;
+    port = (PFLT_PORT)InterlockedExchangePointer(
+        (PVOID volatile *)&g_Data.ClientPort, NULL);
+    if (port != NULL) {
+        FltCloseClientPort(g_Data.Filter, &port);
     }
 
     KeAcquireSpinLock(&g_Data.PidLock, &irql);

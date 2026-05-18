@@ -50,8 +50,8 @@ if ($bcd -notmatch 'testsigning\s+Yes') {
 
 # --- install via InstallHinfSection ---
 Write-Host "[install] running InstallHinfSection on $inf"
-$args = "SETUPAPI.DLL,InstallHinfSection DefaultInstall 132 $inf"
-Start-Process -FilePath 'rundll32.exe' -ArgumentList $args -Wait -Verb runAs
+$rundllArgs = "SETUPAPI.DLL,InstallHinfSection DefaultInstall 132 $inf"
+Start-Process -FilePath 'rundll32.exe' -ArgumentList $rundllArgs -Wait -Verb runAs
 
 # --- load filter ---
 if (-not $NoStart) {

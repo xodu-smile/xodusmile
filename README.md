@@ -88,13 +88,17 @@ python .\.venv\Scripts\pywin32_postinstall.py -install
 
 ## 설치 — Minifilter 드라이버 (EDR 모드)
 
-상세는 [`kmod/README.md`](kmod/README.md) 참고. 요약:
+상세는 [`kmod/README.md`](kmod/README.md) 참고. **모든 단계는 관리자 PowerShell
+에서 실행한다** (인증서 LocalMachine 스토어 등록 + bcdedit + fltmc).
 
 ```powershell
 cd kmod
 
 # 1) 빌드 + 자체 서명 + 카탈로그 생성 + install\ 에 산출물 배치
-.\build.ps1
+#    산출물: kmod\install\{RmDetectorFlt.sys, .inf, .cat, .pdb}
+.\build.ps1                        # Debug|x64 기본
+# .\build.ps1 -Configuration Release  # 필요 시
+# .\build.ps1 -SkipBuild              # 재서명만
 
 # 2) 첫 실행: testsigning 자동 활성화 → 재부팅 안내
 .\install.ps1
@@ -104,6 +108,7 @@ cd kmod
 
 # 확인
 fltmc instances -f RmDetectorFlt
+Get-AuthenticodeSignature .\install\RmDetectorFlt.sys
 
 # 제거
 .\uninstall.ps1

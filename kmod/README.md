@@ -58,21 +58,43 @@ kernel event as a `Signal`, and exposes `block_pid`, `terminate_pid`,
 
 ## Build
 
+Run from an **elevated** PowerShell (admin) — the script writes the
+self-signed cert into `LocalMachine\Root` and `LocalMachine\TrustedPublisher`,
+both of which require admin.
+
 ```powershell
 cd C:\path\to\ransomware_detector\kmod
-.\build.ps1
+.\build.ps1                     # Debug | x64 by default
+# or
+.\build.ps1 -Configuration Release
 ```
 
 What this does:
 
-- Locates `MSBuild` via `vswhere`.
-- Compiles `RmDetectorFlt\RmDetectorFlt.vcxproj` (Debug | x64).
-- Generates a self-signed cert `CN=RmDetectorFltTestCert` if missing,
-  imports it into `LocalMachine\Root` and `LocalMachine\TrustedPublisher`
-  (so the OS will load a binary signed with it under test-signing).
-- Signs `RmDetectorFlt.sys`.
-- Runs `inf2cat` to produce `RmDetectorFlt.cat`, signs that too.
-- Stages all four files into `kmod\install\`.
+1. Locates `MSBuild` via `vswhere` (VS 2022 with WDK workload required).
+2. Compiles `RmDetectorFlt\RmDetectorFlt.vcxproj` (`/p:Configuration=Debug
+   /p:Platform=x64`). Artifacts land in `kmod\x64\<Configuration>\`
+   (`RmDetectorFlt.sys`, `.inf`, `.pdb`).
+3. Generates a self-signed cert `CN=RmDetectorFltTestCert` if missing,
+   imports it into `LocalMachine\Root` and `LocalMachine\TrustedPublisher`
+   so the OS will load a binary signed with it under test-signing.
+4. Signs `RmDetectorFlt.sys` with that cert + a timestamp from
+   `timestamp.digicert.com`.
+5. Runs `inf2cat /driver:<outdir> /os:10_x64` → `RmDetectorFlt.cat`, signs
+   that too.
+6. Copies `sys + inf + cat + pdb` into `kmod\install\`.
+
+Re-running the script is idempotent: pass `-SkipBuild` to re-sign existing
+artifacts without invoking MSBuild.
+
+Verify:
+
+```powershell
+Get-ChildItem .\install\
+# RmDetectorFlt.sys / .inf / .cat / .pdb
+Get-AuthenticodeSignature .\install\RmDetectorFlt.sys
+# Status: Valid    SignerCertificate: CN=RmDetectorFltTestCert
+```
 
 ## Install
 
@@ -178,6 +200,14 @@ bcdedit /set testsigning off
 
 ## Troubleshooting
 
+- **`build.ps1` says `Build artifact missing: ...\x64\Debug\RmDetectorFlt.sys`**
+  → MSBuild succeeded but emitted to a different folder. The vcxproj pins
+  `OutDir` to `$(MSBuildThisFileDirectory)..\x64\$(Configuration)\` so this
+  should not happen — confirm you're on a clean checkout and the `.user`
+  property sheet isn't overriding `OutDir`.
+- **`signtool` complains the timestamp server is unreachable** → re-run
+  with the workstation online. The build script always timestamps; if you
+  intentionally want to skip, pass `-SkipBuild` and re-sign manually.
 - **`fltmc load` returns 0x80070002** → `.sys` not in `system32\drivers`.
   Re-run `install.ps1`; `InstallHinfSection` copies it there.
 - **`fltmc load` returns 0x800705B4** → catalog signature not trusted.
@@ -210,7 +240,7 @@ bcdedit /set testsigning off
 | `RmPreSetInformation` | Canary rename/delete → deny. Rename whose new name ends in a suspicious extension → deny + `RmEventBlockedSuspExt` + score +30. |
 | `RmPostCleanup` | Emit per-handle write summary, free StreamHandle context. |
 | `RmPortMessage` | User-mode commands: set watch / canary / susp-ext paths, block / unblock / terminate PID, set policy, set thresholds, reset PID stats. |
-| `RmPidApplyScore` | Per-PID score accumulator. On crossing `ScoreCritical` emits `RmEventScoreCritical` and (if policy allows) queues a `DelayedWorkQueue` work item that runs `RmTerminateWorker` → `ZwOpenProcess(PROCESS_TERMINATE)` + `ZwTerminateProcess(STATUS_VIRUS_INFECTED)`. |
+| `RmPidApplyScore` | Per-PID score accumulator. On crossing `ScoreCritical` emits `RmEventScoreCritical` and (if policy allows) queues a `DelayedWorkQueue` work item that runs `RmTerminateWorker` → `ZwOpenProcess(PROCESS_TERMINATE)` + `ZwTerminateProcess(STATUS_UNSUCCESSFUL)`. |
 | `RmSampleEntropyX100` | 256-byte sample, distinct-byte count → entropy x100 (0..800). No floats. |
 
 Altitude **385201** is in the `FSFilter Activity Monitor` range
