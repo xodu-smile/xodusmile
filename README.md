@@ -1,51 +1,203 @@
-# Ransomware Detection Agent (Windows 11 Prototype)
+# RansomGuard EDR (Windows 11)
 
-학습용 사용자 모드 랜섬웨어 탐지 프로토타입. **EDR 대체 아님.**
+A small ransomware-focused EDR for Windows 11.  It pairs a kernel-mode
+file-system **minifilter** with user-mode behavioural detectors and an
+**active responder** that can quarantine and terminate a suspicious
+process the moment it crosses a threshold.
 
-## 구성
+> This is a research/training prototype.  Run only on machines you own,
+> ideally an isolated VM.  Loading the driver requires test signing or a
+> trusted signature.
 
-| 모듈 | 역할 |
-|---|---|
-| `detectors/canary.py` | Canary 파일 무결성 (SHA256) |
-| `detectors/mass_io.py` | 대량 I/O + 엔트로피 + 매직바이트 |
-| `detectors/process_cmdline.py` | WMI 기반 VSS/BCD cmdline 룰 |
-| `detectors/process_watcher.py` | psutil 폴링, LOLBin chain, I/O burst |
-| `scoring.py` | 가중치 합산 (120s 윈도우) |
-| `event_store.py` | SQLite 영속화 |
-| `dashboard/app.py` | Flask UI + `/api/processes` |
+## Features
 
-설계: 시그널 → ScoringEngine → Severity. Canary=80, VSS/BCD=60~70, 엔트로피=8~12 (단일 시그널 회피).
+- **Kernel minifilter** (`minifilter/RansomGuard.sys`) — observes
+  `IRP_MJ_CREATE`, `IRP_MJ_WRITE`, and `IRP_MJ_SET_INFORMATION` on every
+  volume; streams `(pid, path, op, bytes)` events to user mode over a
+  filter communication port; and can block subsequent writes/renames
+  from a quarantined PID inside the kernel.
+- **Per-PID burst detection in user mode** — the bridge accumulates
+  write bytes and rename counts per PID; large bursts inside a short
+  window produce HIGH-severity signals independent of which directory
+  the writes hit.
+- **Canary files** — high-confidence trip-wire; any modification yields
+  a CRITICAL signal.
+- **Process command-line rules** — VSS shadow-copy deletion, BCD
+  tampering, Defender disablement, log wiping, BitLocker disable, common
+  PowerShell obfuscation patterns.
+- **Process tree heuristics** — LOLBin parent/child chains (Office →
+  PowerShell, browser → script host), child fan-out from one parent,
+  user-mode disk-write bursts from psutil.
+- **Active responder** — three modes: `off`, `quarantine`, `kill`.  In
+  `kill` mode, any HIGH/CRITICAL signal that carries a PID immediately
+  triggers a kernel quarantine and a `TerminateProcess`.  Critical
+  processes (lsass, csrss, etc.) are on a hard-coded refuse list.
+- **Flask dashboard** at `http://127.0.0.1:5000` — live score, recent
+  events, process table, responder log, manual kill/release.
 
-## 요구사항
+## Architecture
 
-- Windows 11 (22H2+), Python 3.10+ x64
-- 관리자 PowerShell (WMI `Win32_Process` 접근용)
-- `winmgmt` 서비스 동작
-
-## 설치
-
-```powershell
-py -m venv .venv
-.\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-python .\.venv\Scripts\pywin32_postinstall.py -install
+```
+                       +--------------------+
+                       |  RansomGuard.sys   |   (kernel minifilter)
+                       |  IRP_MJ_CREATE /   |
+                       |  WRITE / SETINFO   |
+                       +---------+----------+
+                                 | filter port (\RansomGuardPort)
+                                 v
+   +-----------------+    +---------------------+    +-------------------+
+   |   detectors:    |    |   minifilter_bridge |    |   responder       |
+   |   canary        |--> |   (ctypes -> fltlib)|    |   - quarantine    |
+   |   mass_io       |    +----------+----------+    |   - terminate     |
+   |   process_*     |               |               +-------------------+
+   +--------+--------+               v                          ^
+            |              +---------------------+              |
+            +------------> |   ScoringEngine     | -------------+
+                           |   (rolling 120s)    |
+                           +----------+----------+
+                                      |
+                                      v
+                           +---------------------+
+                           |   EventStore (SQLite)|
+                           +---------------------+
+                                      |
+                                      v
+                           +---------------------+
+                           |   Flask dashboard   |
+                           +---------------------+
 ```
 
-## 실행
+| Component                        | Role                                            |
+|----------------------------------|-------------------------------------------------|
+| `minifilter/RansomGuard.c`       | Kernel minifilter driver                        |
+| `minifilter/RansomGuard.h`       | Shared event/command layout                     |
+| `detectors/minifilter_bridge.py` | User-mode connector (`ctypes` → `fltlib.dll`)   |
+| `detectors/canary.py`            | Canary file SHA-256 trip wires                  |
+| `detectors/mass_io.py`           | Watchdog-based bulk I/O + entropy + magic-byte  |
+| `detectors/process_cmdline.py`   | WMI process-create rules (VSS/BCD/Defender/…)   |
+| `detectors/process_watcher.py`   | psutil polling, LOLBin chains, fan-out          |
+| `scoring.py`                     | Weighted, time-windowed signal aggregation      |
+| `responder.py`                   | Quarantine + terminate suspicious PIDs          |
+| `event_store.py`                 | SQLite persistence                              |
+| `dashboard/app.py`               | Flask UI + `/api/*`                             |
+
+## Requirements
+
+- **OS:** Windows 11 (22H2 or newer), x64.
+- **User-mode:** Python 3.10+ x64.
+- **Kernel-mode build:** Visual Studio 2022 Build Tools with the C++
+  workload + Windows Driver Kit (WDK 10.0.26100 or compatible).
+- **Driver load:** test signing enabled, *or* an attestation-signed
+  catalog for `RansomGuard.sys`.
+
+The user-mode agent alone runs without the WDK or the driver — you just
+lose the kernel-level file I/O signal source.
+
+## Install
+
+From an elevated PowerShell at the repo root:
 
 ```powershell
-# Agent + Dashboard (http://127.0.0.1:5000)
-python agent.py --watch C:\path\to\watch_dir
+# Option A — everything: Python deps + build + install the driver.
+.\scripts\install.ps1
 
-# 콘솔 데모
+# Option B — user-mode only.  Python, venv, requirements.
+.\scripts\bootstrap.ps1
+
+# Option C — bootstrap and also build/install the driver.
+.\scripts\bootstrap.ps1 -BuildDriver -InstallDriver
+```
+
+`bootstrap.ps1` will:
+
+1. install Python 3.12 via `winget` if missing,
+2. create `.venv\` in the repo root,
+3. install `requirements.txt`,
+4. run `pywin32_postinstall -install`,
+5. optionally build and install the driver.
+
+The driver build script (`scripts/build_driver.ps1`) calls `msbuild`
+located via `vswhere` and produces `minifilter\build\x64\Release\
+RansomGuard.sys` plus `.inf` and `.cat`.
+
+If the WDK or VS Build Tools are missing, the script prints the exact
+`winget` lines to install them rather than attempting an unattended
+multi-GB install.
+
+## Run
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+
+# Default: minifilter on, responder will quarantine + kill.
+python agent.py --watch C:\Users\you\Documents
+
+# Headless observer (no killing) — useful while tuning.
+python agent.py --mode off --no-dashboard
+
+# Quarantine but do not terminate.
+python agent.py --mode quarantine
+```
+
+CLI flags:
+
+| Flag                | Effect                                                                 |
+|---------------------|------------------------------------------------------------------------|
+| `--watch <dir>`     | Directory to monitor (repeatable). Default: `./test_watch_dir`.        |
+| `--mode {off,quarantine,kill}` | Responder mode. Default `kill`.                              |
+| `--no-minifilter`   | Skip the kernel bridge (user-mode-only detection).                     |
+| `--no-dashboard`    | Don't start the Flask UI.                                              |
+| `--port N`          | Dashboard port (default `5000`).                                       |
+| `--db PATH`         | SQLite path (default `detector.db`).                                   |
+
+The dashboard exposes:
+
+- `GET  /api/status`     — current score, level, recent signals, responder state
+- `GET  /api/events`     — last 100 persisted signals
+- `GET  /api/processes`  — live process snapshot from the watcher
+- `GET  /api/actions`    — responder action log
+- `POST /api/kill`       — `{ "pid": 1234, "reason": "..." }` manual kill
+- `POST /api/release`    — `{ "pid": 1234 }` release a quarantined PID
+- `POST /api/reset`      — reset the scoring window
+
+## Validation
+
+```powershell
+# In-process demo: spins up the agent and injects safe simulated events.
 python demo_inproc.py
 
-# 시뮬레이터 (실제 암호화/명령 실행 없음, 가짜 이벤트만)
+# Standalone simulator: writes random bytes to dummy files in the watch dir
+# and renames them with .encrypted — NO real cryptography is performed.
 python tests\simulator.py --scenario {canary|encrypt|full}
 ```
 
-격리된 VM/테스트 환경에서만 사용할 것.
+Neither runs real `vssadmin` / `bcdedit` commands; cmdline rules are
+exercised through `ProcessCmdlineDetector.submit_external`.
 
-## 미구현 (후속 과제)
+## Uninstall
 
-Minifilter 드라이버, ETW 직접 구독, Authenticode 화이트리스트, intermittent encryption 대응, 메모리 시그니처 스캔, PPL cmdline 접근.
+```powershell
+.\scripts\uninstall_driver.ps1
+Remove-Item -Recurse -Force .\.venv
+```
+
+## Safety
+
+The responder will terminate processes.  In an automated lab the
+default `kill` mode is what you want; on a desktop you may prefer
+`--mode quarantine` while you tune thresholds.  The hard never-kill
+list in `responder.py:NEVER_KILL` protects `lsass`, `csrss`, etc. — do
+not relax it.
+
+Do not run the simulator on a machine with real user data; it overwrites
+its dummy files with high-entropy noise.
+
+## Known gaps
+
+- No Authenticode whitelist; the responder can in principle terminate
+  signed user processes that look noisy.  Tune `--mode` and watch the
+  responder log on first deploy.
+- The minifilter only observes; it does not write any context to disk
+  for offline forensics.  Use the SQLite event store for that.
+- Intermittent encryption (slow writes spread over hours) is not
+  specifically modelled — the 120s scoring window will not catch it.
