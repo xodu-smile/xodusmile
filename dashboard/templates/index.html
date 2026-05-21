@@ -338,6 +338,120 @@
   .proc-wrap::-webkit-scrollbar-track { background: var(--bg-2); }
   .proc-wrap::-webkit-scrollbar-thumb { background: var(--line); }
 
+  /* ---- incident reports ---- */
+  .reports-panel { margin-top: 24px; }
+  .reports-list {
+    max-height: 320px;
+    overflow-y: auto;
+  }
+  .reports-list::-webkit-scrollbar { width: 6px; }
+  .reports-list::-webkit-scrollbar-track { background: var(--bg-2); }
+  .reports-list::-webkit-scrollbar-thumb { background: var(--line); }
+  .report {
+    border-left: 2px solid var(--crit);
+    padding: 10px 14px;
+    margin-bottom: 8px;
+    background: var(--bg-3);
+    font-size: 12px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+  }
+  .report.quarantined { border-left-color: var(--warn); }
+  .report-meta {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+  }
+  .report-title { color: var(--ink); }
+  .report-title .verb {
+    color: var(--crit);
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    font-size: 10px;
+    margin-right: 8px;
+  }
+  .report.quarantined .verb { color: var(--warn); }
+  .report-sub { color: var(--ink-dim); font-size: 10px; }
+  .report-sub .k { color: var(--ink-faint); }
+  .report-link {
+    color: var(--accent);
+    font-size: 10px;
+    text-decoration: none;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    border: 1px solid var(--line);
+    padding: 6px 10px;
+    transition: all 0.15s;
+    white-space: nowrap;
+  }
+  .report-link:hover {
+    border-color: var(--accent);
+    background: rgba(217, 122, 60, 0.08);
+  }
+
+  /* ---- toast ---- */
+  .toast-stack {
+    position: fixed;
+    top: 24px;
+    right: 24px;
+    z-index: 9999;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    pointer-events: none;
+  }
+  .toast {
+    background: var(--bg-2);
+    border: 1px solid var(--crit);
+    border-left: 4px solid var(--crit);
+    padding: 14px 18px;
+    max-width: 360px;
+    color: var(--ink);
+    font-size: 12px;
+    box-shadow: 0 6px 24px rgba(224, 65, 62, 0.25);
+    pointer-events: auto;
+    animation: toast-in 0.3s ease;
+  }
+  .toast.quarantine {
+    border-color: var(--warn);
+    border-left-color: var(--warn);
+    box-shadow: 0 6px 24px rgba(232, 179, 57, 0.22);
+  }
+  @keyframes toast-in {
+    from { opacity: 0; transform: translateX(20px); }
+    to   { opacity: 1; transform: translateX(0); }
+  }
+  .toast.leaving { animation: toast-out 0.3s ease forwards; }
+  @keyframes toast-out {
+    to { opacity: 0; transform: translateX(20px); }
+  }
+  .toast-head {
+    font-family: 'Major Mono Display', monospace;
+    color: var(--crit);
+    letter-spacing: 0.1em;
+    font-size: 11px;
+    margin-bottom: 6px;
+  }
+  .toast.quarantine .toast-head { color: var(--warn); }
+  .toast-body { margin-bottom: 6px; }
+  .toast-foot {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    color: var(--ink-dim);
+    font-size: 10px;
+  }
+  .toast-foot a {
+    color: var(--accent);
+    text-decoration: none;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+  }
+  .toast-foot a:hover { text-decoration: underline; }
+
   /* footer */
   .footer {
     margin-top: 40px;
@@ -441,9 +555,21 @@
   </div>
 </div>
 
+<div class="panel reports-panel">
+  <div class="panel-head">
+    <span>incident reports</span>
+    <span class="corner">[05]</span>
+  </div>
+  <div class="reports-list" id="reports-list">
+    <div class="empty">no incidents recorded</div>
+  </div>
+</div>
+
+<div class="toast-stack" id="toast-stack"></div>
+
 <div class="footer">
   <span>// detectors: canary · mass_io · process_cmdline · process_watcher</span>
-  <span>refresh: 1500ms · proc: 2000ms</span>
+  <span>refresh: 1500ms · proc: 2000ms · reports: 2500ms</span>
 </div>
 
 <script>
@@ -589,6 +715,100 @@
   }
   procTick();
   setInterval(procTick, 2000);
+
+  // --- incident reports panel + toast notifications --------------------
+  const reportsList = document.getElementById('reports-list');
+  const toastStack  = document.getElementById('toast-stack');
+  const seenReports = new Set();
+  let firstReportTick = true;
+
+  function fmtFullTime(ts) {
+    const d = new Date(ts * 1000);
+    const pad = n => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} `
+         + `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+  }
+
+  function renderReports(reports) {
+    if (!reports.length) {
+      reportsList.innerHTML = '<div class="empty">no incidents recorded</div>';
+      return;
+    }
+    reportsList.innerHTML = reports.map(r => {
+      const verb = r.terminated ? 'killed'
+                 : r.quarantined ? 'quarantined' : 'noop';
+      const cls = r.terminated ? '' : 'quarantined';
+      const href = '/api/reports/' + encodeURIComponent(r.filename);
+      return `
+        <div class="report ${cls}">
+          <div class="report-meta">
+            <div class="report-title">
+              <span class="verb">${verb}</span>
+              <span>${escape(r.process_name)}</span>
+              <span class="k" style="color:var(--ink-faint)"> · pid ${r.pid}</span>
+            </div>
+            <div class="report-sub">
+              <span class="k">when=</span>${fmtFullTime(r.timestamp)}
+              · <span class="k">reason=</span>${escape(r.reason)}
+            </div>
+          </div>
+          <a class="report-link" href="${href}" target="_blank">view .md</a>
+        </div>`;
+    }).join('');
+  }
+
+  function spawnToast(report) {
+    const verb = report.terminated ? 'PROCESS KILLED'
+               : report.quarantined ? 'PROCESS QUARANTINED' : 'INCIDENT';
+    const cls = report.terminated ? '' : 'quarantine';
+    const href = '/api/reports/' + encodeURIComponent(report.filename);
+    const div = document.createElement('div');
+    div.className = 'toast ' + cls;
+    div.innerHTML = `
+      <div class="toast-head">// ${verb}</div>
+      <div class="toast-body">
+        <div><strong>${escape(report.process_name)}</strong>
+             <span style="color:var(--ink-dim)"> · pid ${report.pid}</span></div>
+        <div style="color:var(--ink-dim); font-size: 11px; margin-top: 4px;">
+          reason: ${escape(report.reason)}
+        </div>
+      </div>
+      <div class="toast-foot">
+        <span>${fmtFullTime(report.timestamp)}</span>
+        <a href="${href}" target="_blank">open report</a>
+      </div>`;
+    toastStack.appendChild(div);
+    setTimeout(() => {
+      div.classList.add('leaving');
+      setTimeout(() => div.remove(), 320);
+    }, 10000);
+  }
+
+  async function reportsTick() {
+    try {
+      const res = await fetch('/api/reports');
+      const data = await res.json();
+      const reports = data.reports || [];
+      renderReports(reports);
+
+      // Surface a toast for anything we haven't seen before.  On the
+      // very first tick we just seed the set so we don't spam toasts
+      // for incidents that happened before the dashboard was open.
+      if (firstReportTick) {
+        reports.forEach(r => seenReports.add(r.filename));
+        firstReportTick = false;
+      } else {
+        for (const r of reports.slice().reverse()) {
+          if (!seenReports.has(r.filename)) {
+            seenReports.add(r.filename);
+            spawnToast(r);
+          }
+        }
+      }
+    } catch (e) { /* silent */ }
+  }
+  reportsTick();
+  setInterval(reportsTick, 2500);
 </script>
 </body>
 </html>

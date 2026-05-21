@@ -2,7 +2,7 @@
 Flask Dashboard
 """
 
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, Response, jsonify, render_template, request
 
 
 def create_app(agent):
@@ -57,5 +57,17 @@ def create_app(agent):
             return jsonify({"ok": False, "error": "pid required"}), 400
         ok = agent.responder.manual_release(pid)
         return jsonify({"ok": ok})
+
+    @app.route("/api/reports")
+    def api_reports():
+        return jsonify({"reports": agent.incident_reporter.recent(limit=100)})
+
+    @app.route("/api/reports/<path:filename>")
+    def api_report_body(filename: str):
+        body = agent.incident_reporter.read_report(filename)
+        if body is None:
+            return jsonify({"ok": False, "error": "not found"}), 404
+        # text/markdown so browsers render-as-text and curl pipes cleanly.
+        return Response(body, mimetype="text/markdown; charset=utf-8")
 
     return app
