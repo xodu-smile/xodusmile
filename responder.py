@@ -36,7 +36,7 @@ import threading
 import time
 from dataclasses import dataclass, field, asdict
 from enum import Enum
-from typing import Callable, Dict, List, Optional, Set
+from typing import Callable, Dict, List, Optional, Set, Tuple
 
 try:
     import psutil
@@ -244,7 +244,7 @@ class ProcessResponder:
     def _is_never_kill(self, proc_name: str) -> bool:
         return (proc_name or "").lower() in NEVER_KILL
 
-    def _lookup(self, pid: int) -> tuple[str, str]:
+    def _lookup(self, pid: int) -> Tuple[str, str]:
         if not HAS_PSUTIL:
             return ("", "")
         try:
@@ -255,7 +255,7 @@ class ProcessResponder:
         except Exception:
             return ("", "")
 
-    def _terminate(self, pid: int) -> tuple[bool, Optional[str]]:
+    def _terminate(self, pid: int) -> Tuple[bool, Optional[str]]:
         # Prefer psutil — it works cross-platform and handles permissions.
         if HAS_PSUTIL:
             try:

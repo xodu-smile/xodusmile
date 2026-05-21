@@ -193,6 +193,7 @@ class MinifilterBridge(Detector):
         self._own_pid = os.getpid()
         self._pids: Dict[int, _PidIoState] = defaultdict(_PidIoState)
         self._burst_alerted: Dict[int, float] = {}
+        self._rename_burst_alerted: Dict[int, float] = {}
         self._lock = threading.Lock()
         self._connected_event = threading.Event()
         self._known_paths: Dict[int, str] = {}     # pid → most recent path
@@ -408,8 +409,6 @@ class MinifilterBridge(Detector):
 
     def _account_rename(self, pid: int, path: str, now: float) -> None:
         state = self._pids[pid]
-        if state.rename_times is None:
-            state.rename_times = deque()
         state.rename_times.append(now)
         cutoff = now - PID_RENAME_BURST_WINDOW
         while state.rename_times and state.rename_times[0] < cutoff:
@@ -418,10 +417,10 @@ class MinifilterBridge(Detector):
         if len(state.rename_times) < PID_RENAME_BURST_COUNT:
             return
 
-        last = self._burst_alerted.get((pid, "rename"), 0.0)  # type: ignore[arg-type]
+        last = self._rename_burst_alerted.get(pid, 0.0)
         if now - last < PID_RENAME_BURST_WINDOW:
             return
-        self._burst_alerted[(pid, "rename")] = now  # type: ignore[assignment]
+        self._rename_burst_alerted[pid] = now
 
         self.emit(Signal(
             detector=self.name,
