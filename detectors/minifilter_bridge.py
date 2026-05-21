@@ -27,7 +27,7 @@ import threading
 import time
 from collections import defaultdict, deque
 from ctypes import wintypes
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Deque, Dict, Optional, Tuple
 
 from .base import Detector
@@ -171,7 +171,7 @@ def _load_fltlib() -> Optional[ctypes.WinDLL]:
 class _PidIoState:
     write_total: int = 0
     write_window_start: float = 0.0
-    rename_times: Deque[float] = None    # type: ignore[assignment]
+    rename_times: Deque[float] = field(default_factory=deque)
 
 
 class MinifilterBridge(Detector):
@@ -191,9 +191,7 @@ class MinifilterBridge(Detector):
         self._port: Optional[wintypes.HANDLE] = None
         self._lib = _load_fltlib()
         self._own_pid = os.getpid()
-        self._pids: Dict[int, _PidIoState] = defaultdict(
-            lambda: _PidIoState(rename_times=deque())
-        )
+        self._pids: Dict[int, _PidIoState] = defaultdict(_PidIoState)
         self._burst_alerted: Dict[int, float] = {}
         self._lock = threading.Lock()
         self._connected_event = threading.Event()

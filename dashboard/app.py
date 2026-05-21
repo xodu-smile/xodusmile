@@ -12,6 +12,7 @@ REPORT_MAX_LIMIT = 5000
 
 
 def _md_escape(s) -> str:
+    """Escape characters that would break the markdown table cell."""
     return str(s).replace("|", "\\|").replace("\n", " ").replace("\r", " ")
 
 
