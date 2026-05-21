@@ -21,6 +21,7 @@ from detectors.process_cmdline import ProcessCmdlineDetector
 from detectors.process_watcher import ProcessWatcher
 from detectors.minifilter_bridge import MinifilterBridge
 from responder import ProcessResponder, ResponderMode
+from incident_report import IncidentReporter
 
 
 class Agent:
@@ -29,7 +30,9 @@ class Agent:
                  *,
                  db_path: str = "detector.db",
                  responder_mode: ResponderMode = ResponderMode.KILL,
-                 enable_minifilter: bool = True):
+                 enable_minifilter: bool = True,
+                 reports_dir: str = "reports",
+                 notify_user: bool = True):
         self.engine = ScoringEngine()
         self.store = EventStore(db_path)
         self.engine.subscribe(self._on_signal)
@@ -40,6 +43,12 @@ class Agent:
         self.watcher   = ProcessWatcher(self.engine)
         self.minifilter = MinifilterBridge(self.engine) if enable_minifilter else None
 
+        self.incident_reporter = IncidentReporter(
+            self.engine,
+            reports_dir=reports_dir,
+            notify=notify_user,
+        )
+
         # The responder talks to the kernel through the bridge, so it
         # needs a reference even when minifilter mode is off (in which
         # case it falls back to user-mode-only termination).
@@ -47,6 +56,7 @@ class Agent:
             self.engine,
             mode=responder_mode,
             minifilter=self.minifilter,
+            on_action=self.incident_reporter.on_action,
         )
         self.responder.attach()
 
@@ -104,6 +114,7 @@ class Agent:
                 ),
                 "recent_actions": self.responder.actions(limit=20),
             },
+            "incidents": self.incident_reporter.recent(limit=20),
         }
 
     def processes(self, limit: int = 50) -> list:
@@ -135,6 +146,14 @@ def parse_args():
         help="Disable the kernel minifilter bridge "
              "(falls back to user-mode-only detection)",
     )
+    p.add_argument(
+        "--reports-dir", default="reports",
+        help="Directory for markdown incident reports (default ./reports)",
+    )
+    p.add_argument(
+        "--no-notify", action="store_true",
+        help="Suppress desktop notifications when a process is killed",
+    )
     return p.parse_args()
 
 
@@ -149,6 +168,8 @@ def main():
         db_path=args.db,
         responder_mode=ResponderMode(args.mode),
         enable_minifilter=not args.no_minifilter,
+        reports_dir=args.reports_dir,
+        notify_user=not args.no_notify,
     )
     agent.start()
 
