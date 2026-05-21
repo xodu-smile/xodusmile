@@ -22,6 +22,20 @@ process the moment it crosses a threshold.
   the writes hit.
 - **Canary files** — high-confidence trip-wire; any modification yields
   a CRITICAL signal.
+- **Entropy-aware bulk I/O detection** — Shannon entropy + magic-byte
+  loss on a per-file basis, with three guards against the usual
+  false-positive sources:
+    - *Per-file ΔH cache* — `high_entropy_write` only fires on the
+      transition from low to high entropy, so re-touching an
+      already-compressed/encrypted file is silent.
+    - *Fan-out bonus* — a modification burst that spans many
+      extensions and parent directories is weighted higher than a
+      same-folder burst (a backup tool dumping to one dir scores low;
+      a sweep across `Documents`, `Pictures`, `Downloads` scores high).
+    - *Canary cross-signal* — once a canary trips, the entropy
+      threshold drops and entropy/magic weights are multiplied by 1.5
+      for 30 s, so the second wave of writes after a canary hit is
+      caught aggressively.
 - **Process command-line rules** — VSS shadow-copy deletion, BCD
   tampering, Defender disablement, log wiping, BitLocker disable, common
   PowerShell obfuscation patterns.
@@ -73,7 +87,7 @@ process the moment it crosses a threshold.
 | `minifilter/RansomGuard.h`       | Shared event/command layout                     |
 | `detectors/minifilter_bridge.py` | User-mode connector (`ctypes` → `fltlib.dll`)   |
 | `detectors/canary.py`            | Canary file SHA-256 trip wires                  |
-| `detectors/mass_io.py`           | Watchdog-based bulk I/O + entropy + magic-byte  |
+| `detectors/mass_io.py`           | Watchdog bulk I/O + ΔH entropy + fan-out + canary boost |
 | `detectors/process_cmdline.py`   | WMI process-create rules (VSS/BCD/Defender/…)   |
 | `detectors/process_watcher.py`   | psutil polling, LOLBin chains, fan-out          |
 | `scoring.py`                     | Weighted, time-windowed signal aggregation      |
