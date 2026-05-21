@@ -143,12 +143,12 @@ CONST FLT_REGISTRATION FilterRegistration = {
     RgInstanceQueryTeardown,        // InstanceQueryTeardownCallback
     NULL,                           // InstanceTeardownStart
     NULL,                           // InstanceTeardownComplete
-    NULL, NULL, NULL,               // Name provider callbacks
-    NULL,                           // TransactionNotification
-    NULL,                           // NormalizeNameComponent
-    NULL,                           // NormalizeContextCleanup
-    NULL,                           // TransactionNotification (Ex)
-    NULL,                           // SectionNotificationCallback
+    NULL,                           // GenerateFileNameCallback
+    NULL,                           // NormalizeNameComponentCallback
+    NULL,                           // NormalizeContextCleanupCallback
+    NULL,                           // TransactionNotificationCallback
+    NULL,                           // NormalizeNameComponentExCallback
+    NULL                            // SectionNotificationCallback
 };
 
 /* -------------------------------------------------------------------------- */
@@ -156,7 +156,7 @@ CONST FLT_REGISTRATION FilterRegistration = {
 /* -------------------------------------------------------------------------- */
 
 NTSTATUS DriverEntry(_In_ PDRIVER_OBJECT DriverObject,
-                     _In_ PUNICODE_STRING RegistryPath)
+    _In_ PUNICODE_STRING RegistryPath)
 {
     UNREFERENCED_PARAMETER(RegistryPath);
 
@@ -165,40 +165,54 @@ NTSTATUS DriverEntry(_In_ PDRIVER_OBJECT DriverObject,
     PSECURITY_DESCRIPTOR sd = NULL;
     OBJECT_ATTRIBUTES oa;
 
+    DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "RansomGuard: DriverEntry called\n");
+
     RtlZeroMemory(&g_Rg, sizeof(g_Rg));
     ExInitializeFastMutex(&g_Rg.ClientLock);
     FltInitializePushLock(&g_Rg.QuarantineLock);
     KeQueryPerformanceCounter(&g_Rg.PerfFrequency);
 
+    DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "RansomGuard: Calling FltRegisterFilter\n");
+
     status = FltRegisterFilter(DriverObject, &FilterRegistration, &g_Rg.Filter);
     if (!NT_SUCCESS(status)) {
+        DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "RansomGuard: FltRegisterFilter FAILED status=0x%X\n", status);
         return status;
     }
 
+    DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "RansomGuard: FltRegisterFilter OK\n");
+
     status = FltBuildDefaultSecurityDescriptor(&sd, FLT_PORT_ALL_ACCESS);
     if (!NT_SUCCESS(status)) {
+        DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "RansomGuard: FltBuildDefaultSecurityDescriptor FAILED status=0x%X\n", status);
         goto fail_filter;
     }
+
+    DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "RansomGuard: Creating communication port\n");
 
     RtlInitUnicodeString(&portName, RG_PORT_NAME);
     InitializeObjectAttributes(&oa, &portName,
-                               OBJ_KERNEL_HANDLE | OBJ_CASE_INSENSITIVE,
-                               NULL, sd);
-
+        OBJ_KERNEL_HANDLE | OBJ_CASE_INSENSITIVE,
+        NULL, sd);
     status = FltCreateCommunicationPort(g_Rg.Filter, &g_Rg.ServerPort, &oa,
-                                        NULL,
-                                        RgPortConnect, RgPortDisconnect,
-                                        RgPortMessage, 1);
+        NULL,
+        RgPortConnect, RgPortDisconnect,
+        RgPortMessage, 1);
     FltFreeSecurityDescriptor(sd);
     if (!NT_SUCCESS(status)) {
+        DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "RansomGuard: FltCreateCommunicationPort FAILED status=0x%X\n", status);
         goto fail_filter;
     }
 
+    DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "RansomGuard: Starting filtering\n");
+
     status = FltStartFiltering(g_Rg.Filter);
     if (!NT_SUCCESS(status)) {
+        DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "RansomGuard: FltStartFiltering FAILED status=0x%X\n", status);
         goto fail_port;
     }
 
+    DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "RansomGuard: SUCCESS - filter loaded\n");
     return STATUS_SUCCESS;
 
 fail_port:
@@ -377,22 +391,22 @@ static NTSTATUS RgPortMessage(_In_opt_ PVOID PortCookie,
     }
 
     if (cmd.Version != RG_PROTOCOL_VERSION) {
-        reply.Status = STATUS_REVISION_MISMATCH;
+        reply.Status = (ULONG)STATUS_REVISION_MISMATCH;
         goto write_reply;
     }
 
     switch (cmd.Kind) {
     case RgCmdQuarantinePid:
-        reply.Status = RgAddQuarantine(cmd.ProcessId);
+        reply.Status = (ULONG)RgAddQuarantine(cmd.ProcessId);
         break;
     case RgCmdReleasePid:
-        reply.Status = RgRemoveQuarantine(cmd.ProcessId);
+        reply.Status = (ULONG)RgRemoveQuarantine(cmd.ProcessId);
         break;
     case RgCmdPing:
         reply.Status = STATUS_SUCCESS;
         break;
     default:
-        reply.Status = STATUS_INVALID_PARAMETER;
+        reply.Status = (ULONG)STATUS_INVALID_PARAMETER;
         break;
     }
 

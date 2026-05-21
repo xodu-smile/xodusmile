@@ -65,7 +65,23 @@ PID_WRITE_BURST_BYTES   = 75 * 1024 * 1024
 PID_WRITE_BURST_WINDOW  = 4.0
 PID_RENAME_BURST_COUNT  = 20
 PID_RENAME_BURST_WINDOW = 5.0
-
+# Paths that generate noise but aren't malicious - skip event processing
+NOISY_PATHS = (
+    "\\appdata\\local\\google\\chrome\\",
+    "\\appdata\\local\\microsoft\\edge\\",
+    "\\appdata\\local\\microsoft\\windows\\",
+    "\\appdata\\roaming\\microsoft\\windows\\recent\\",
+    "\\windows\\softwaredistribution\\",
+    "\\windows\\system32\\config\\",
+    "\\windows\\temp\\",
+    "\\windows\\winsxs\\",
+    "\\$recycle.bin\\",
+    "\\system volume information\\",
+    "\\indexeddb\\",
+    "\\cache_data\\",
+    "\\jumplisticons",
+    "\\customdestinations",
+)
 
 # ---------------------------------------------------------------------------
 # ctypes layout
@@ -336,6 +352,12 @@ class MinifilterBridge(Detector):
         if path:
             self._known_paths[pid] = path
         now = time.time()
+        # Skip noisy system paths (browser caches, Windows internals, etc.)
+        if path:
+            path_lower = path.lower()
+            for noisy in NOISY_PATHS:
+                if noisy in path_lower:
+                    return
 
         if evt.Kind == EVENT_BLOCKED:
             self.emit(Signal(

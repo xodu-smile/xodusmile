@@ -57,12 +57,36 @@ class ResponderMode(str, Enum):
 # them bluescreens the box.  We treat any match as a hard refusal even
 # when the user has explicitly requested KILL mode.
 NEVER_KILL = {
+    # OS 핵심 프로세스 (기존)
     "system", "registry", "smss.exe", "csrss.exe", "wininit.exe",
     "services.exe", "lsass.exe", "winlogon.exe", "fontdrvhost.exe",
     "dwm.exe", "memcompression",
-    # Our own process and Python.  We will replace py.exe with the live
-    # PID at runtime, but this is a safety belt.
+    
+    # Python (기존)
     "python.exe", "py.exe", "pythonw.exe",
+    
+    # 브라우저 (추가) — 캐시 정리로 오탐 잘 일어남
+    "chrome.exe", "msedge.exe", "edge.exe", "firefox.exe",
+    "iexplore.exe", "brave.exe", "opera.exe",
+    
+    # Windows 탐색기 / UI (추가)
+    "explorer.exe", "systemsettings.exe", "shellexperiencehost.exe",
+    "searchhost.exe", "startmenuexperiencehost.exe",
+    
+    # 시스템 서비스 (추가)
+    "svchost.exe", "wininit.exe", "spoolsv.exe", "audiodg.exe",
+    "conhost.exe", "taskhostw.exe", "runtimebroker.exe",
+    
+    # 개발 도구 (추가)
+    "devenv.exe", "code.exe", "node.exe", "powershell.exe",
+    "powershell_ise.exe", "cmd.exe", "wt.exe",
+    
+    # Windows Update / 백그라운드 (추가)
+    "backgrounddownload.exe", "wmiprvse.exe", "trustedinstaller.exe",
+    "tiworker.exe", "musnotification.exe",
+    
+    # 보안 (추가) — 자신 외 다른 EDR 등
+    "msmpeng.exe", "mssense.exe", "securityhealthservice.exe",
 }
 
 
