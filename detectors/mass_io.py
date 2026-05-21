@@ -326,7 +326,7 @@ class MassIODetector(Detector):
     def _record_file_state(self, key: str, magic: str, entropy: float) -> None:
         # 캐시 상한 — 가장 오래된 항목 일괄 정리 (간단한 LRU 대체).
         if len(self._last_magic) >= MAX_TRACKED_FILES:
-            # dict 삽입 순서를 활용해서 앞쪽 절반 잘라냄.
+            # Use dict insertion order to drop the oldest half of entries.
             drop = len(self._last_magic) // 2
             for k in list(self._last_magic.keys())[:drop]:
                 self._last_magic.pop(k, None)

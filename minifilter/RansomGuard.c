@@ -25,7 +25,6 @@
 #define RG_TAG  'GnsR'
 
 #define RG_MAX_QUARANTINED      256
-#define RG_LIST_BUCKETS         64
 
 /* -------------------------------------------------------------------------- */
 /* Global state                                                                */
