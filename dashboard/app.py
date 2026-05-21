@@ -12,7 +12,6 @@ REPORT_MAX_LIMIT = 5000
 
 
 def _md_escape(s) -> str:
-    """Escape characters that would break the markdown table cell."""
     return str(s).replace("|", "\\|").replace("\n", " ").replace("\r", " ")
 
 
@@ -119,6 +118,10 @@ def create_app(agent):
     def api_processes():
         return jsonify({"processes": agent.processes(limit=60)})
 
+    @app.route("/api/actions")
+    def api_actions():
+        return jsonify({"actions": agent.responder.actions(limit=100)})
+
     @app.route("/api/reset", methods=["POST"])
     def api_reset():
         agent.engine.reset()
@@ -139,5 +142,26 @@ def create_app(agent):
             mimetype="text/markdown; charset=utf-8",
             headers={"Content-Disposition": f'attachment; filename="{filename}"'},
         )
+
+    @app.route("/api/kill", methods=["POST"])
+    def api_kill():
+        body = request.get_json(silent=True) or {}
+        try:
+            pid = int(body.get("pid"))
+        except (TypeError, ValueError):
+            return jsonify({"ok": False, "error": "pid required"}), 400
+        reason = str(body.get("reason") or "manual-via-dashboard")
+        action = agent.responder.manual_kill(pid, reason=reason)
+        return jsonify({"ok": True, "action": action.to_dict()})
+
+    @app.route("/api/release", methods=["POST"])
+    def api_release():
+        body = request.get_json(silent=True) or {}
+        try:
+            pid = int(body.get("pid"))
+        except (TypeError, ValueError):
+            return jsonify({"ok": False, "error": "pid required"}), 400
+        ok = agent.responder.manual_release(pid)
+        return jsonify({"ok": ok})
 
     return app
