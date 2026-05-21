@@ -1,16 +1,23 @@
 /*
  * RansomGuard.c
  *
- * Windows file-system minifilter that observes file create/write/rename
- * activity, forwards each event to a user-mode listener over a filter
- * communication port, and can block subsequent file mutations from a PID
- * that user mode has marked as quarantined.
+ * Windows file-system minifilter + process / registry / handle telemetry
+ * driver.  Streams events to user mode over a filter communication port
+ * and can:
+ *   - block file mutations from a quarantined PID  (v1)
+ *   - tamper-protect a user-mode agent PID by stripping dangerous handle
+ *     access rights from non-self callers                (v2)
+ *   - report process creation with command line          (v2)
+ *   - report writes/deletes against sensitive reg keys   (v2)
  *
- * The driver is intentionally small: heavy logic lives in user mode.  The
- * kernel side does three things only:
- *   1. Stream events up (PID + path + op + bytes).
- *   2. Maintain a small bitmap of quarantined PIDs.
- *   3. Fail WRITE / SET_INFORMATION pre-ops for quarantined PIDs.
+ * Heavy logic still lives in user mode.  The driver does:
+ *   1. Stream file / process / registry / tamper events up
+ *   2. Maintain three small bitmaps:
+ *        QuarantinedPids   — blocked from file mutations
+ *        ProtectedPids     — handle-access stripped by ObCallback
+ *   3. Fail WRITE / SET_INFORMATION pre-ops for quarantined PIDs
+ *   4. Strip PROCESS_TERMINATE, PROCESS_VM_*, etc. from handles opened
+ *      to protected PIDs by callers other than themselves
  *
  * Build with the Windows Driver Kit; the .vcxproj in this directory wires
  * the WDK targets in.  Test-sign or install on a machine with test signing
@@ -18,6 +25,7 @@
  */
 
 #include <fltKernel.h>
+#include <ntddk.h>
 #include <dontuse.h>
 #include <suppress.h>
 #include "RansomGuard.h"
@@ -25,7 +33,26 @@
 #define RG_TAG  'GnsR'
 
 #define RG_MAX_QUARANTINED      256
-#define RG_LIST_BUCKETS         64
+#define RG_MAX_PROTECTED        16
+
+/* Access mask bits we strip from handles opened to a protected PID. */
+#define RG_DENY_PROCESS_ACCESS  (PROCESS_TERMINATE          | \
+                                 PROCESS_VM_WRITE           | \
+                                 PROCESS_VM_READ            | \
+                                 PROCESS_VM_OPERATION       | \
+                                 PROCESS_CREATE_THREAD      | \
+                                 PROCESS_DUP_HANDLE         | \
+                                 PROCESS_SUSPEND_RESUME     | \
+                                 PROCESS_SET_INFORMATION    | \
+                                 PROCESS_SET_QUOTA)
+
+#define RG_DENY_THREAD_ACCESS   (THREAD_TERMINATE           | \
+                                 THREAD_SUSPEND_RESUME      | \
+                                 THREAD_SET_CONTEXT         | \
+                                 THREAD_SET_INFORMATION     | \
+                                 THREAD_SET_THREAD_TOKEN    | \
+                                 THREAD_IMPERSONATE         | \
+                                 THREAD_DIRECT_IMPERSONATION)
 
 /* -------------------------------------------------------------------------- */
 /* Global state                                                                */
@@ -39,10 +66,45 @@ typedef struct _RG_GLOBALS {
     EX_PUSH_LOCK      QuarantineLock;
     ULONG             QuarantinedPids[RG_MAX_QUARANTINED];
     ULONG             QuarantinedCount;
+    EX_PUSH_LOCK      ProtectedLock;
+    ULONG             ProtectedPids[RG_MAX_PROTECTED];
+    ULONG             ProtectedCount;
     LARGE_INTEGER     PerfFrequency;
+    LARGE_INTEGER     CmCookie;          // CmRegisterCallbackEx cookie
+    PVOID             ObCallbackHandle;  // ObRegisterCallbacks registration
+    BOOLEAN           ProcessCallbackRegistered;
+    BOOLEAN           CmCallbackRegistered;
 } RG_GLOBALS;
 
 static RG_GLOBALS g_Rg;
+
+/* Registry paths we watch.  Stored lowercased; we compare with a case-
+ * insensitive prefix match.  Kept tiny on purpose: a real EDR would push
+ * this from user mode, but here the list of "things ransomware tampers
+ * with" is well-bounded and fits in source. */
+static const PCWSTR kRgWatchedRegPrefixes[] = {
+    L"\\registry\\machine\\software\\microsoft\\windows defender",
+    L"\\registry\\machine\\software\\policies\\microsoft\\windows defender",
+    L"\\registry\\machine\\system\\currentcontrolset\\services\\windefend",
+    L"\\registry\\machine\\system\\currentcontrolset\\services\\wdfilter",
+    L"\\registry\\machine\\system\\currentcontrolset\\services\\wdboot",
+    L"\\registry\\machine\\system\\currentcontrolset\\services\\sense",
+    L"\\registry\\machine\\system\\currentcontrolset\\services\\ransomguard",
+    L"\\registry\\machine\\system\\currentcontrolset\\control\\safeboot",
+    L"\\registry\\machine\\software\\microsoft\\windows\\currentversion\\run",
+    L"\\registry\\machine\\software\\microsoft\\windows\\currentversion\\runonce",
+    L"\\registry\\user\\",   // catches HKCU\Software\...\Run when joined with suffix check below
+};
+
+/* HKCU value-name suffixes we care about (lower-case).  An HKCU key path
+ * starts with \registry\user\<sid>\..., so we accept the user prefix
+ * above and then verify the rest of the path contains one of these. */
+static const PCWSTR kRgWatchedRegSuffixes[] = {
+    L"\\software\\microsoft\\windows\\currentversion\\run",
+    L"\\software\\microsoft\\windows\\currentversion\\runonce",
+    L"\\software\\microsoft\\windows\\currentversion\\policies\\system",
+    L"\\software\\policies\\microsoft\\windows defender",
+};
 
 /* -------------------------------------------------------------------------- */
 /* Forward declarations                                                        */
@@ -113,13 +175,31 @@ static NTSTATUS RgPortMessage(_In_opt_ PVOID PortCookie,
 static BOOLEAN RgIsQuarantined(_In_ ULONG ProcessId);
 static NTSTATUS RgAddQuarantine(_In_ ULONG ProcessId);
 static NTSTATUS RgRemoveQuarantine(_In_ ULONG ProcessId);
+static VOID     RgFlushQuarantine(VOID);
 
-static VOID RgSendEvent(_In_ RG_EVENT_KIND Kind,
-                        _In_ ULONG SubKind,
-                        _In_ PFLT_CALLBACK_DATA Data,
-                        _In_ PCFLT_RELATED_OBJECTS FltObjects,
-                        _In_ ULONGLONG WriteBytes,
-                        _In_ NTSTATUS OpStatus);
+static BOOLEAN RgIsProtected(_In_ ULONG ProcessId);
+static NTSTATUS RgAddProtected(_In_ ULONG ProcessId);
+static NTSTATUS RgRemoveProtected(_In_ ULONG ProcessId);
+
+static VOID RgSendFileEvent(_In_ RG_EVENT_KIND Kind,
+                            _In_ ULONG SubKind,
+                            _In_ PFLT_CALLBACK_DATA Data,
+                            _In_ PCFLT_RELATED_OBJECTS FltObjects,
+                            _In_ ULONGLONG WriteBytes,
+                            _In_ NTSTATUS OpStatus);
+
+static VOID RgSendRawEvent(_In_ PRG_EVENT Event);
+
+static VOID RgProcessNotifyEx(_Inout_ PEPROCESS Process,
+                              _In_ HANDLE ProcessId,
+                              _In_opt_ PPS_CREATE_NOTIFY_INFO CreateInfo);
+
+static NTSTATUS RgRegistryCallback(_In_ PVOID CallbackContext,
+                                   _In_opt_ PVOID Argument1,
+                                   _In_opt_ PVOID Argument2);
+
+static OB_PREOP_CALLBACK_STATUS RgObPreOperation(_In_ PVOID RegistrationContext,
+                                                 _Inout_ POB_PRE_OPERATION_INFORMATION OperationInformation);
 
 /* -------------------------------------------------------------------------- */
 /* Callback registration                                                       */
@@ -151,6 +231,9 @@ CONST FLT_REGISTRATION FilterRegistration = {
     NULL                            // SectionNotificationCallback
 };
 
+static OB_OPERATION_REGISTRATION g_ObOperations[2];
+static OB_CALLBACK_REGISTRATION  g_ObRegistration;
+
 /* -------------------------------------------------------------------------- */
 /* DriverEntry / unload                                                        */
 /* -------------------------------------------------------------------------- */
@@ -162,6 +245,7 @@ NTSTATUS DriverEntry(_In_ PDRIVER_OBJECT DriverObject,
 
     NTSTATUS status;
     UNICODE_STRING portName;
+    UNICODE_STRING cmAltitude;
     PSECURITY_DESCRIPTOR sd = NULL;
     OBJECT_ATTRIBUTES oa;
 
@@ -170,25 +254,22 @@ NTSTATUS DriverEntry(_In_ PDRIVER_OBJECT DriverObject,
     RtlZeroMemory(&g_Rg, sizeof(g_Rg));
     ExInitializeFastMutex(&g_Rg.ClientLock);
     FltInitializePushLock(&g_Rg.QuarantineLock);
+    FltInitializePushLock(&g_Rg.ProtectedLock);
     KeQueryPerformanceCounter(&g_Rg.PerfFrequency);
-
-    DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "RansomGuard: Calling FltRegisterFilter\n");
 
     status = FltRegisterFilter(DriverObject, &FilterRegistration, &g_Rg.Filter);
     if (!NT_SUCCESS(status)) {
-        DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "RansomGuard: FltRegisterFilter FAILED status=0x%X\n", status);
+        DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL,
+            "RansomGuard: FltRegisterFilter FAILED 0x%X\n", status);
         return status;
     }
 
-    DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "RansomGuard: FltRegisterFilter OK\n");
-
     status = FltBuildDefaultSecurityDescriptor(&sd, FLT_PORT_ALL_ACCESS);
     if (!NT_SUCCESS(status)) {
-        DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "RansomGuard: FltBuildDefaultSecurityDescriptor FAILED status=0x%X\n", status);
+        DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL,
+            "RansomGuard: FltBuildDefaultSecurityDescriptor FAILED 0x%X\n", status);
         goto fail_filter;
     }
-
-    DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "RansomGuard: Creating communication port\n");
 
     RtlInitUnicodeString(&portName, RG_PORT_NAME);
     InitializeObjectAttributes(&oa, &portName,
@@ -200,22 +281,89 @@ NTSTATUS DriverEntry(_In_ PDRIVER_OBJECT DriverObject,
         RgPortMessage, 1);
     FltFreeSecurityDescriptor(sd);
     if (!NT_SUCCESS(status)) {
-        DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "RansomGuard: FltCreateCommunicationPort FAILED status=0x%X\n", status);
+        DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL,
+            "RansomGuard: FltCreateCommunicationPort FAILED 0x%X\n", status);
         goto fail_filter;
     }
 
-    DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "RansomGuard: Starting filtering\n");
+    /* Process create/exit kernel callback.  Reported on the same port as
+     * file events so user mode has one queue. */
+    status = PsSetCreateProcessNotifyRoutineEx(RgProcessNotifyEx, FALSE);
+    if (NT_SUCCESS(status)) {
+        g_Rg.ProcessCallbackRegistered = TRUE;
+    } else {
+        DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL,
+            "RansomGuard: PsSetCreateProcessNotifyRoutineEx FAILED 0x%X\n", status);
+        /* Non-fatal: file telemetry still works. */
+    }
+
+    /* Registry callback.  Altitude must be a unique string; we pick one
+     * adjacent to the filter altitude. */
+    RtlInitUnicodeString(&cmAltitude, L"385202");
+    status = CmRegisterCallbackEx(RgRegistryCallback, &cmAltitude,
+                                  DriverObject, NULL, &g_Rg.CmCookie, NULL);
+    if (NT_SUCCESS(status)) {
+        g_Rg.CmCallbackRegistered = TRUE;
+    } else {
+        DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL,
+            "RansomGuard: CmRegisterCallbackEx FAILED 0x%X\n", status);
+        /* Non-fatal. */
+    }
+
+    /* Object-manager callbacks for tamper protection.  Only registers
+     * the operations table; pre-operation does the actual access strip. */
+    RtlZeroMemory(g_ObOperations, sizeof(g_ObOperations));
+    g_ObOperations[0].ObjectType = PsProcessType;
+    g_ObOperations[0].Operations = OB_OPERATION_HANDLE_CREATE | OB_OPERATION_HANDLE_DUPLICATE;
+    g_ObOperations[0].PreOperation = RgObPreOperation;
+    g_ObOperations[1].ObjectType = PsThreadType;
+    g_ObOperations[1].Operations = OB_OPERATION_HANDLE_CREATE | OB_OPERATION_HANDLE_DUPLICATE;
+    g_ObOperations[1].PreOperation = RgObPreOperation;
+
+    RtlZeroMemory(&g_ObRegistration, sizeof(g_ObRegistration));
+    g_ObRegistration.Version = OB_FLT_REGISTRATION_VERSION;
+    g_ObRegistration.OperationRegistrationCount = 2;
+    RtlInitUnicodeString(&g_ObRegistration.Altitude, L"385203");
+    g_ObRegistration.RegistrationContext = NULL;
+    g_ObRegistration.OperationRegistration = g_ObOperations;
+
+    status = ObRegisterCallbacks(&g_ObRegistration, &g_Rg.ObCallbackHandle);
+    if (!NT_SUCCESS(status)) {
+        /* ObRegisterCallbacks requires a properly signed driver in
+         * production.  Under test-signing it works; log and continue. */
+        DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL,
+            "RansomGuard: ObRegisterCallbacks FAILED 0x%X (tamper protection off)\n",
+            status);
+        g_Rg.ObCallbackHandle = NULL;
+    }
 
     status = FltStartFiltering(g_Rg.Filter);
     if (!NT_SUCCESS(status)) {
-        DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "RansomGuard: FltStartFiltering FAILED status=0x%X\n", status);
-        goto fail_port;
+        DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL,
+            "RansomGuard: FltStartFiltering FAILED 0x%X\n", status);
+        goto fail_callbacks;
     }
 
-    DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "RansomGuard: SUCCESS - filter loaded\n");
+    DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL,
+        "RansomGuard: ready (proc=%u reg=%u ob=%u)\n",
+        g_Rg.ProcessCallbackRegistered,
+        g_Rg.CmCallbackRegistered,
+        g_Rg.ObCallbackHandle != NULL);
     return STATUS_SUCCESS;
 
-fail_port:
+fail_callbacks:
+    if (g_Rg.ObCallbackHandle) {
+        ObUnRegisterCallbacks(g_Rg.ObCallbackHandle);
+        g_Rg.ObCallbackHandle = NULL;
+    }
+    if (g_Rg.CmCallbackRegistered) {
+        CmUnRegisterCallback(g_Rg.CmCookie);
+        g_Rg.CmCallbackRegistered = FALSE;
+    }
+    if (g_Rg.ProcessCallbackRegistered) {
+        PsSetCreateProcessNotifyRoutineEx(RgProcessNotifyEx, TRUE);
+        g_Rg.ProcessCallbackRegistered = FALSE;
+    }
     FltCloseCommunicationPort(g_Rg.ServerPort);
     g_Rg.ServerPort = NULL;
 fail_filter:
@@ -228,6 +376,20 @@ static NTSTATUS RgUnload(_In_ FLT_FILTER_UNLOAD_FLAGS Flags)
 {
     UNREFERENCED_PARAMETER(Flags);
 
+    /* Unregister in reverse order of registration.  Each of these
+     * unregister calls is synchronous and drains pending callbacks. */
+    if (g_Rg.ObCallbackHandle) {
+        ObUnRegisterCallbacks(g_Rg.ObCallbackHandle);
+        g_Rg.ObCallbackHandle = NULL;
+    }
+    if (g_Rg.CmCallbackRegistered) {
+        CmUnRegisterCallback(g_Rg.CmCookie);
+        g_Rg.CmCallbackRegistered = FALSE;
+    }
+    if (g_Rg.ProcessCallbackRegistered) {
+        PsSetCreateProcessNotifyRoutineEx(RgProcessNotifyEx, TRUE);
+        g_Rg.ProcessCallbackRegistered = FALSE;
+    }
     if (g_Rg.ServerPort) {
         FltCloseCommunicationPort(g_Rg.ServerPort);
         g_Rg.ServerPort = NULL;
@@ -237,6 +399,7 @@ static NTSTATUS RgUnload(_In_ FLT_FILTER_UNLOAD_FLAGS Flags)
         g_Rg.Filter = NULL;
     }
     FltDeletePushLock(&g_Rg.QuarantineLock);
+    FltDeletePushLock(&g_Rg.ProtectedLock);
     return STATUS_SUCCESS;
 }
 
@@ -320,6 +483,77 @@ static NTSTATUS RgRemoveQuarantine(_In_ ULONG ProcessId)
     return STATUS_SUCCESS;
 }
 
+static VOID RgFlushQuarantine(VOID)
+{
+    FltAcquirePushLockExclusive(&g_Rg.QuarantineLock);
+    g_Rg.QuarantinedCount = 0;
+    FltReleasePushLock(&g_Rg.QuarantineLock);
+}
+
+/* -------------------------------------------------------------------------- */
+/* Protected-PID bitmap (tamper protection target set)                         */
+/* -------------------------------------------------------------------------- */
+
+static BOOLEAN RgIsProtected(_In_ ULONG ProcessId)
+{
+    BOOLEAN found = FALSE;
+    ULONG i;
+
+    FltAcquirePushLockShared(&g_Rg.ProtectedLock);
+    for (i = 0; i < g_Rg.ProtectedCount; ++i) {
+        if (g_Rg.ProtectedPids[i] == ProcessId) {
+            found = TRUE;
+            break;
+        }
+    }
+    FltReleasePushLock(&g_Rg.ProtectedLock);
+    return found;
+}
+
+static NTSTATUS RgAddProtected(_In_ ULONG ProcessId)
+{
+    NTSTATUS status = STATUS_SUCCESS;
+    ULONG i;
+    BOOLEAN exists = FALSE;
+
+    if (ProcessId == 0) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    FltAcquirePushLockExclusive(&g_Rg.ProtectedLock);
+    for (i = 0; i < g_Rg.ProtectedCount; ++i) {
+        if (g_Rg.ProtectedPids[i] == ProcessId) {
+            exists = TRUE;
+            break;
+        }
+    }
+    if (!exists) {
+        if (g_Rg.ProtectedCount >= RG_MAX_PROTECTED) {
+            status = STATUS_INSUFFICIENT_RESOURCES;
+        } else {
+            g_Rg.ProtectedPids[g_Rg.ProtectedCount++] = ProcessId;
+        }
+    }
+    FltReleasePushLock(&g_Rg.ProtectedLock);
+    return status;
+}
+
+static NTSTATUS RgRemoveProtected(_In_ ULONG ProcessId)
+{
+    ULONG i;
+
+    FltAcquirePushLockExclusive(&g_Rg.ProtectedLock);
+    for (i = 0; i < g_Rg.ProtectedCount; ++i) {
+        if (g_Rg.ProtectedPids[i] == ProcessId) {
+            g_Rg.ProtectedPids[i] =
+                g_Rg.ProtectedPids[--g_Rg.ProtectedCount];
+            break;
+        }
+    }
+    FltReleasePushLock(&g_Rg.ProtectedLock);
+    return STATUS_SUCCESS;
+}
+
 /* -------------------------------------------------------------------------- */
 /* Communication port                                                          */
 /* -------------------------------------------------------------------------- */
@@ -357,11 +591,12 @@ static VOID RgPortDisconnect(_In_opt_ PVOID ConnectionCookie)
     }
     ExReleaseFastMutex(&g_Rg.ClientLock);
 
-    // Releasing the listener means no one is consuming events; drop the
-    // quarantine list so user mode rebuilds it on reconnect.
-    FltAcquirePushLockExclusive(&g_Rg.QuarantineLock);
-    g_Rg.QuarantinedCount = 0;
-    FltReleasePushLock(&g_Rg.QuarantineLock);
+    /* v2: do NOT clear the quarantine list on disconnect.  Earlier
+     * versions flushed it here, which meant an attacker who killed the
+     * user-mode bridge for one second would release every blocked PID.
+     * The agent must now send RgCmdFlushQuarantine explicitly during a
+     * clean shutdown if it wants the list cleared.  Protected PIDs are
+     * likewise sticky for the same reason. */
 }
 
 static NTSTATUS RgPortMessage(_In_opt_ PVOID PortCookie,
@@ -402,6 +637,16 @@ static NTSTATUS RgPortMessage(_In_opt_ PVOID PortCookie,
     case RgCmdReleasePid:
         reply.Status = (ULONG)RgRemoveQuarantine(cmd.ProcessId);
         break;
+    case RgCmdProtectPid:
+        reply.Status = (ULONG)RgAddProtected(cmd.ProcessId);
+        break;
+    case RgCmdUnprotectPid:
+        reply.Status = (ULONG)RgRemoveProtected(cmd.ProcessId);
+        break;
+    case RgCmdFlushQuarantine:
+        RgFlushQuarantine();
+        reply.Status = STATUS_SUCCESS;
+        break;
     case RgCmdPing:
         reply.Status = STATUS_SUCCESS;
         break;
@@ -432,7 +677,6 @@ write_reply:
 static ULONGLONG RgTimestampNs(VOID)
 {
     LARGE_INTEGER counter = KeQueryPerformanceCounter(NULL);
-    // Convert to nanoseconds: (counter * 1e9) / freq.  Use 64-bit math.
     if (g_Rg.PerfFrequency.QuadPart == 0) {
         return 0;
     }
@@ -440,11 +684,32 @@ static ULONGLONG RgTimestampNs(VOID)
                        (ULONGLONG)g_Rg.PerfFrequency.QuadPart);
 }
 
-/*
- * Resolve the requested file name into a normalized DOS path string and
- * copy it (up to RG_MAX_PATH_CHARS) into the event.  Returns the number of
- * WCHARs written including the terminator.
- */
+/* Copy a UNICODE_STRING into the event's fixed-WCHAR buffer.  Returns the
+ * number of WCHARs written, including the terminator (0 on empty). */
+static ULONG RgCopyUnicode(_In_opt_ PUNICODE_STRING Src,
+                           _Out_writes_z_(MaxChars) PWCHAR Dest,
+                           _In_ ULONG MaxChars)
+{
+    USHORT chars;
+
+    if (MaxChars == 0) {
+        return 0;
+    }
+    Dest[0] = L'\0';
+
+    if (Src == NULL || Src->Buffer == NULL || Src->Length == 0) {
+        return 0;
+    }
+
+    chars = (USHORT)(Src->Length / sizeof(WCHAR));
+    if (chars >= MaxChars) {
+        chars = (USHORT)(MaxChars - 1);
+    }
+    RtlCopyMemory(Dest, Src->Buffer, chars * sizeof(WCHAR));
+    Dest[chars] = L'\0';
+    return chars + 1u;
+}
+
 static ULONG RgCopyFileName(_In_ PFLT_CALLBACK_DATA Data,
                             _In_ PCFLT_RELATED_OBJECTS FltObjects,
                             _Out_writes_z_(RG_MAX_PATH_CHARS) PWCHAR Dest)
@@ -463,22 +728,8 @@ static ULONG RgCopyFileName(_In_ PFLT_CALLBACK_DATA Data,
     }
 
     status = FltParseFileNameInformation(nameInfo);
-    if (!NT_SUCCESS(status)) {
-        FltReleaseFileNameInformation(nameInfo);
-        return 0;
-    }
-
-    {
-        USHORT bytes = nameInfo->Name.Length;
-        USHORT chars = (USHORT)(bytes / sizeof(WCHAR));
-        if (chars >= RG_MAX_PATH_CHARS) {
-            chars = RG_MAX_PATH_CHARS - 1;
-        }
-        if (chars > 0) {
-            RtlCopyMemory(Dest, nameInfo->Name.Buffer, chars * sizeof(WCHAR));
-        }
-        Dest[chars] = L'\0';
-        copied = chars + 1;
+    if (NT_SUCCESS(status)) {
+        copied = RgCopyUnicode(&nameInfo->Name, Dest, RG_MAX_PATH_CHARS);
     }
 
     FltReleaseFileNameInformation(nameInfo);
@@ -486,17 +737,46 @@ static ULONG RgCopyFileName(_In_ PFLT_CALLBACK_DATA Data,
     return copied;
 }
 
-static VOID RgSendEvent(_In_ RG_EVENT_KIND Kind,
-                        _In_ ULONG SubKind,
-                        _In_ PFLT_CALLBACK_DATA Data,
-                        _In_ PCFLT_RELATED_OBJECTS FltObjects,
-                        _In_ ULONGLONG WriteBytes,
-                        _In_ NTSTATUS OpStatus)
+/* Send a fully-populated event structure up the port.  Used by the
+ * non-file event sources (process / registry / tamper) which build the
+ * RG_EVENT themselves. */
+static VOID RgSendRawEvent(_In_ PRG_EVENT Event)
+{
+    PFLT_PORT clientPort;
+    LARGE_INTEGER timeout;
+    NTSTATUS status;
+
+    ExAcquireFastMutex(&g_Rg.ClientLock);
+    clientPort = g_Rg.ClientPort;
+    ExReleaseFastMutex(&g_Rg.ClientLock);
+    if (clientPort == NULL) {
+        return;
+    }
+
+    Event->Version = RG_PROTOCOL_VERSION;
+    if (Event->TimestampNs == 0) {
+        Event->TimestampNs = RgTimestampNs();
+    }
+
+    /* 50 ms cap; if user mode is wedged we drop the event rather than
+     * stall a kernel callback path. */
+    timeout.QuadPart = -((LONGLONG)50 * 10 * 1000);
+    status = FltSendMessage(g_Rg.Filter, &clientPort, Event, sizeof(RG_EVENT),
+                            NULL, NULL, &timeout);
+    UNREFERENCED_PARAMETER(status);
+}
+
+static VOID RgSendFileEvent(_In_ RG_EVENT_KIND Kind,
+                            _In_ ULONG SubKind,
+                            _In_ PFLT_CALLBACK_DATA Data,
+                            _In_ PCFLT_RELATED_OBJECTS FltObjects,
+                            _In_ ULONGLONG WriteBytes,
+                            _In_ NTSTATUS OpStatus)
 {
     PFLT_PORT clientPort;
     PRG_EVENT evt;
-    NTSTATUS status;
     LARGE_INTEGER timeout;
+    NTSTATUS status;
 
     ExAcquireFastMutex(&g_Rg.ClientLock);
     clientPort = g_Rg.ClientPort;
@@ -511,17 +791,16 @@ static VOID RgSendEvent(_In_ RG_EVENT_KIND Kind,
     }
 
     RtlZeroMemory(evt, sizeof(RG_EVENT));
-    evt->Version    = RG_PROTOCOL_VERSION;
-    evt->Kind       = (ULONG)Kind;
-    evt->SubKind    = SubKind;
-    evt->ProcessId  = (ULONG)(ULONG_PTR)PsGetCurrentProcessId();
-    evt->ThreadId   = (ULONG)(ULONG_PTR)PsGetCurrentThreadId();
-    evt->Status     = (ULONG)OpStatus;
-    evt->WriteBytes = WriteBytes;
+    evt->Version     = RG_PROTOCOL_VERSION;
+    evt->Kind        = (ULONG)Kind;
+    evt->SubKind     = SubKind;
+    evt->ProcessId   = (ULONG)(ULONG_PTR)PsGetCurrentProcessId();
+    evt->ThreadId    = (ULONG)(ULONG_PTR)PsGetCurrentThreadId();
+    evt->Status      = (ULONG)OpStatus;
+    evt->WriteBytes  = WriteBytes;
     evt->TimestampNs = RgTimestampNs();
-    evt->PathLength = RgCopyFileName(Data, FltObjects, evt->Path);
+    evt->PathLength  = RgCopyFileName(Data, FltObjects, evt->Path);
 
-    // 50 ms cap; if user mode is wedged we drop the event rather than stall I/O.
     timeout.QuadPart = -((LONGLONG)50 * 10 * 1000);
     status = FltSendMessage(g_Rg.Filter, &clientPort, evt, sizeof(RG_EVENT),
                             NULL, NULL, &timeout);
@@ -531,7 +810,7 @@ static VOID RgSendEvent(_In_ RG_EVENT_KIND Kind,
 }
 
 /* -------------------------------------------------------------------------- */
-/* Callbacks                                                                   */
+/* File callbacks                                                              */
 /* -------------------------------------------------------------------------- */
 
 static FLT_PREOP_CALLBACK_STATUS RgPreCreate(
@@ -563,7 +842,7 @@ static FLT_POSTOP_CALLBACK_STATUS RgPostCreate(
         return FLT_POSTOP_FINISHED_PROCESSING;
     }
 
-    RgSendEvent(RgEventCreate, 0, Data, FltObjects, 0, Data->IoStatus.Status);
+    RgSendFileEvent(RgEventCreate, 0, Data, FltObjects, 0, Data->IoStatus.Status);
     return FLT_POSTOP_FINISHED_PROCESSING;
 }
 
@@ -580,9 +859,8 @@ static FLT_PREOP_CALLBACK_STATUS RgPreWrite(
 
     ULONG pid = (ULONG)(ULONG_PTR)PsGetCurrentProcessId();
     if (RgIsQuarantined(pid)) {
-        // Tell user mode why this got blocked, then fail the IRP.
-        RgSendEvent(RgEventBlocked, RgEventWrite, Data, FltObjects, 0,
-                    STATUS_ACCESS_DENIED);
+        RgSendFileEvent(RgEventBlocked, RgEventWrite, Data, FltObjects, 0,
+                        STATUS_ACCESS_DENIED);
         Data->IoStatus.Status = STATUS_ACCESS_DENIED;
         Data->IoStatus.Information = 0;
         return FLT_PREOP_COMPLETE;
@@ -607,13 +885,12 @@ static FLT_POSTOP_CALLBACK_STATUS RgPostWrite(
     }
 
     ULONGLONG bytes = (ULONGLONG)Data->IoStatus.Information;
-    // Throttle: skip sub-page writes to keep the user-mode queue small.
     if (bytes < 4096) {
         return FLT_POSTOP_FINISHED_PROCESSING;
     }
 
-    RgSendEvent(RgEventWrite, 0, Data, FltObjects, bytes,
-                Data->IoStatus.Status);
+    RgSendFileEvent(RgEventWrite, 0, Data, FltObjects, bytes,
+                    Data->IoStatus.Status);
     return FLT_POSTOP_FINISHED_PROCESSING;
 }
 
@@ -645,15 +922,14 @@ static FLT_PREOP_CALLBACK_STATUS RgPreSetInfo(
     ULONG sub = RgClassifySetInfo(
         Data->Iopb->Parameters.SetFileInformation.FileInformationClass);
 
-    // We only care about rename/delete here.
     if (sub == RgSetInfoOther) {
         return FLT_PREOP_SUCCESS_NO_CALLBACK;
     }
 
     ULONG pid = (ULONG)(ULONG_PTR)PsGetCurrentProcessId();
     if (RgIsQuarantined(pid)) {
-        RgSendEvent(RgEventBlocked, sub, Data, FltObjects, 0,
-                    STATUS_ACCESS_DENIED);
+        RgSendFileEvent(RgEventBlocked, sub, Data, FltObjects, 0,
+                        STATUS_ACCESS_DENIED);
         Data->IoStatus.Status = STATUS_ACCESS_DENIED;
         Data->IoStatus.Information = 0;
         return FLT_PREOP_COMPLETE;
@@ -677,7 +953,322 @@ static FLT_POSTOP_CALLBACK_STATUS RgPostSetInfo(
     }
 
     ULONG sub = (ULONG)(ULONG_PTR)CompletionContext;
-    RgSendEvent(RgEventSetInfo, sub, Data, FltObjects, 0,
-                Data->IoStatus.Status);
+    RgSendFileEvent(RgEventSetInfo, sub, Data, FltObjects, 0,
+                    Data->IoStatus.Status);
     return FLT_POSTOP_FINISHED_PROCESSING;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Process create/exit callback                                                */
+/* -------------------------------------------------------------------------- */
+
+static VOID RgProcessNotifyEx(_Inout_ PEPROCESS Process,
+                              _In_ HANDLE ProcessId,
+                              _In_opt_ PPS_CREATE_NOTIFY_INFO CreateInfo)
+{
+    PRG_EVENT evt;
+
+    UNREFERENCED_PARAMETER(Process);
+
+    /* Allocate from non-paged: this callback can be invoked at <= APC_LEVEL
+     * and we must not page-fault inside it. */
+    evt = (PRG_EVENT)ExAllocatePool2(POOL_FLAG_NON_PAGED, sizeof(RG_EVENT), RG_TAG);
+    if (evt == NULL) {
+        return;
+    }
+    RtlZeroMemory(evt, sizeof(RG_EVENT));
+
+    evt->ProcessId   = (ULONG)(ULONG_PTR)ProcessId;
+    evt->TimestampNs = RgTimestampNs();
+
+    if (CreateInfo != NULL) {
+        evt->Kind            = (ULONG)RgEventProcessStart;
+        evt->ParentProcessId = (ULONG)(ULONG_PTR)CreateInfo->ParentProcessId;
+        evt->Status          = (ULONG)CreateInfo->CreationStatus;
+        evt->PathLength      = RgCopyUnicode(
+            (PUNICODE_STRING)CreateInfo->ImageFileName,
+            evt->Path, RG_MAX_PATH_CHARS);
+        evt->ExtraLength     = RgCopyUnicode(
+            (PUNICODE_STRING)CreateInfo->CommandLine,
+            evt->Extra, RG_MAX_EXTRA_CHARS);
+    } else {
+        evt->Kind = (ULONG)RgEventProcessExit;
+    }
+
+    RgSendRawEvent(evt);
+    ExFreePoolWithTag(evt, RG_TAG);
+}
+
+/* -------------------------------------------------------------------------- */
+/* Registry callback                                                           */
+/* -------------------------------------------------------------------------- */
+
+/* Case-insensitive prefix match: does Haystack begin with Needle?  Both
+ * inputs are NUL-terminated lower-case WCHAR strings. */
+static BOOLEAN RgIciStartsWith(_In_ PCWSTR Haystack, _In_ PCWSTR Needle)
+{
+    while (*Needle) {
+        WCHAR a = *Haystack;
+        WCHAR b = *Needle;
+        if (a == L'\0') {
+            return FALSE;
+        }
+        if (a >= L'A' && a <= L'Z') a = (WCHAR)(a + 32);
+        if (b >= L'A' && b <= L'Z') b = (WCHAR)(b + 32);
+        if (a != b) {
+            return FALSE;
+        }
+        ++Haystack;
+        ++Needle;
+    }
+    return TRUE;
+}
+
+/* Case-insensitive substring match. */
+static BOOLEAN RgIciContains(_In_ PCWSTR Haystack, _In_ PCWSTR Needle)
+{
+    if (*Needle == L'\0') {
+        return TRUE;
+    }
+    for (PCWSTR p = Haystack; *p; ++p) {
+        if (RgIciStartsWith(p, Needle)) {
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+static BOOLEAN RgPathIsWatched(_In_ PCWSTR Path)
+{
+    SIZE_T i;
+    BOOLEAN isUserHive;
+
+    for (i = 0; i < RTL_NUMBER_OF(kRgWatchedRegPrefixes); ++i) {
+        if (RgIciStartsWith(Path, kRgWatchedRegPrefixes[i])) {
+            isUserHive = RgIciStartsWith(Path, L"\\registry\\user\\");
+            if (!isUserHive) {
+                return TRUE;
+            }
+            /* For HKCU we also require one of the suffix patterns to hit,
+             * otherwise every per-user explorer write would fire. */
+            for (SIZE_T j = 0; j < RTL_NUMBER_OF(kRgWatchedRegSuffixes); ++j) {
+                if (RgIciContains(Path, kRgWatchedRegSuffixes[j])) {
+                    return TRUE;
+                }
+            }
+            return FALSE;
+        }
+    }
+    return FALSE;
+}
+
+/* Map REG_NOTIFY_CLASS pre-operation classes to our compressed subkind. */
+static ULONG RgClassifyRegOp(_In_ REG_NOTIFY_CLASS Class)
+{
+    switch (Class) {
+    case RegNtPreSetValueKey:    return RgRegSetValue;
+    case RegNtPreDeleteValueKey: return RgRegDeleteValue;
+    case RegNtPreCreateKeyEx:    return RgRegCreateKey;
+    case RegNtPreDeleteKey:      return RgRegDeleteKey;
+    case RegNtPreRenameKey:      return RgRegRenameKey;
+    default:                     return RgRegOther;
+    }
+}
+
+static NTSTATUS RgRegistryCallback(_In_ PVOID CallbackContext,
+                                   _In_opt_ PVOID Argument1,
+                                   _In_opt_ PVOID Argument2)
+{
+    REG_NOTIFY_CLASS notifyClass;
+    ULONG sub;
+    PCUNICODE_STRING keyName = NULL;
+    PUNICODE_STRING valueName = NULL;
+    PVOID keyObject = NULL;
+    NTSTATUS status;
+    PRG_EVENT evt;
+
+    UNREFERENCED_PARAMETER(CallbackContext);
+
+    if (Argument1 == NULL || Argument2 == NULL) {
+        return STATUS_SUCCESS;
+    }
+
+    notifyClass = (REG_NOTIFY_CLASS)(ULONG_PTR)Argument1;
+    sub = RgClassifyRegOp(notifyClass);
+    if (sub == RgRegOther) {
+        return STATUS_SUCCESS;
+    }
+
+    switch (notifyClass) {
+    case RegNtPreSetValueKey: {
+        PREG_SET_VALUE_KEY_INFORMATION info = (PREG_SET_VALUE_KEY_INFORMATION)Argument2;
+        keyObject = info->Object;
+        valueName = info->ValueName;
+        break;
+    }
+    case RegNtPreDeleteValueKey: {
+        PREG_DELETE_VALUE_KEY_INFORMATION info = (PREG_DELETE_VALUE_KEY_INFORMATION)Argument2;
+        keyObject = info->Object;
+        valueName = info->ValueName;
+        break;
+    }
+    case RegNtPreCreateKeyEx: {
+        PREG_CREATE_KEY_INFORMATION info = (PREG_CREATE_KEY_INFORMATION)Argument2;
+        /* CreateKey pre-op gives us a complete path string, not an
+         * object pointer.  Send it directly. */
+        if (info->CompleteName == NULL || info->CompleteName->Length == 0) {
+            return STATUS_SUCCESS;
+        }
+        /* Quick filter against watched prefixes before allocating. */
+        if (info->CompleteName->Buffer[0] != L'\\' ||
+            !RgPathIsWatched(info->CompleteName->Buffer)) {
+            return STATUS_SUCCESS;
+        }
+        evt = (PRG_EVENT)ExAllocatePool2(POOL_FLAG_NON_PAGED, sizeof(RG_EVENT), RG_TAG);
+        if (evt == NULL) return STATUS_SUCCESS;
+        RtlZeroMemory(evt, sizeof(RG_EVENT));
+        evt->Kind        = (ULONG)RgEventRegistry;
+        evt->SubKind     = sub;
+        evt->ProcessId   = (ULONG)(ULONG_PTR)PsGetCurrentProcessId();
+        evt->ThreadId    = (ULONG)(ULONG_PTR)PsGetCurrentThreadId();
+        evt->PathLength  = RgCopyUnicode((PUNICODE_STRING)info->CompleteName,
+                                         evt->Path, RG_MAX_PATH_CHARS);
+        RgSendRawEvent(evt);
+        ExFreePoolWithTag(evt, RG_TAG);
+        return STATUS_SUCCESS;
+    }
+    case RegNtPreDeleteKey: {
+        PREG_DELETE_KEY_INFORMATION info = (PREG_DELETE_KEY_INFORMATION)Argument2;
+        keyObject = info->Object;
+        break;
+    }
+    case RegNtPreRenameKey: {
+        PREG_RENAME_KEY_INFORMATION info = (PREG_RENAME_KEY_INFORMATION)Argument2;
+        keyObject = info->Object;
+        break;
+    }
+    default:
+        return STATUS_SUCCESS;
+    }
+
+    if (keyObject == NULL) {
+        return STATUS_SUCCESS;
+    }
+
+    /* Resolve the key object to its full registry path. */
+    status = CmCallbackGetKeyObjectIDEx(&g_Rg.CmCookie, keyObject, NULL,
+                                        &keyName, 0);
+    if (!NT_SUCCESS(status) || keyName == NULL) {
+        return STATUS_SUCCESS;
+    }
+
+    if (keyName->Length == 0 || keyName->Buffer == NULL ||
+        !RgPathIsWatched(keyName->Buffer)) {
+        CmCallbackReleaseKeyObjectIDEx(keyName);
+        return STATUS_SUCCESS;
+    }
+
+    evt = (PRG_EVENT)ExAllocatePool2(POOL_FLAG_NON_PAGED, sizeof(RG_EVENT), RG_TAG);
+    if (evt == NULL) {
+        CmCallbackReleaseKeyObjectIDEx(keyName);
+        return STATUS_SUCCESS;
+    }
+    RtlZeroMemory(evt, sizeof(RG_EVENT));
+    evt->Kind       = (ULONG)RgEventRegistry;
+    evt->SubKind    = sub;
+    evt->ProcessId  = (ULONG)(ULONG_PTR)PsGetCurrentProcessId();
+    evt->ThreadId   = (ULONG)(ULONG_PTR)PsGetCurrentThreadId();
+    evt->PathLength = RgCopyUnicode((PUNICODE_STRING)keyName,
+                                    evt->Path, RG_MAX_PATH_CHARS);
+    if (valueName != NULL) {
+        evt->ExtraLength = RgCopyUnicode(valueName,
+                                         evt->Extra, RG_MAX_EXTRA_CHARS);
+    }
+    RgSendRawEvent(evt);
+    ExFreePoolWithTag(evt, RG_TAG);
+
+    CmCallbackReleaseKeyObjectIDEx(keyName);
+    return STATUS_SUCCESS;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Object-manager callback (tamper protection)                                 */
+/* -------------------------------------------------------------------------- */
+
+static OB_PREOP_CALLBACK_STATUS RgObPreOperation(_In_ PVOID RegistrationContext,
+                                                 _Inout_ POB_PRE_OPERATION_INFORMATION OperationInformation)
+{
+    PEPROCESS target;
+    HANDLE targetPidH;
+    ULONG targetPid;
+    ULONG requesterPid;
+    ACCESS_MASK *desired;
+    ACCESS_MASK before;
+    ACCESS_MASK stripped;
+    BOOLEAN isThread;
+
+    UNREFERENCED_PARAMETER(RegistrationContext);
+
+    if (OperationInformation->KernelHandle) {
+        return OB_PREOP_SUCCESS;
+    }
+
+    isThread = (OperationInformation->ObjectType == *PsThreadType);
+    if (isThread) {
+        PETHREAD t = (PETHREAD)OperationInformation->Object;
+        target = IoThreadToProcess(t);
+    } else {
+        target = (PEPROCESS)OperationInformation->Object;
+    }
+    if (target == NULL) {
+        return OB_PREOP_SUCCESS;
+    }
+
+    targetPidH = PsGetProcessId(target);
+    targetPid  = (ULONG)(ULONG_PTR)targetPidH;
+    if (targetPid == 0 || !RgIsProtected(targetPid)) {
+        return OB_PREOP_SUCCESS;
+    }
+
+    requesterPid = (ULONG)(ULONG_PTR)PsGetCurrentProcessId();
+    if (requesterPid == targetPid) {
+        return OB_PREOP_SUCCESS;   // self-access is always allowed
+    }
+
+    /* Select pre-op vs duplicate access mask. */
+    if (OperationInformation->Operation == OB_OPERATION_HANDLE_CREATE) {
+        desired = &OperationInformation->Parameters->CreateHandleInformation.DesiredAccess;
+    } else {
+        desired = &OperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess;
+    }
+
+    before  = *desired;
+    stripped = isThread ? (before & RG_DENY_THREAD_ACCESS)
+                        : (before & RG_DENY_PROCESS_ACCESS);
+    if (stripped == 0) {
+        return OB_PREOP_SUCCESS;
+    }
+    *desired = before & ~stripped;
+
+    /* Notify user mode best-effort.  Keep the event payload tiny — we are
+     * inside an Ob pre-op and must not block. */
+    {
+        PRG_EVENT evt = (PRG_EVENT)ExAllocatePool2(POOL_FLAG_NON_PAGED,
+                                                   sizeof(RG_EVENT), RG_TAG);
+        if (evt != NULL) {
+            RtlZeroMemory(evt, sizeof(RG_EVENT));
+            evt->Kind            = (ULONG)RgEventTamperBlocked;
+            evt->SubKind         = isThread ? (ULONG)RgTamperThread
+                                            : (ULONG)RgTamperProcess;
+            evt->ProcessId       = targetPid;
+            evt->ParentProcessId = requesterPid;
+            evt->DesiredAccess   = (ULONG)before;
+            evt->Status          = (ULONG)stripped;
+            evt->TimestampNs     = RgTimestampNs();
+            RgSendRawEvent(evt);
+            ExFreePoolWithTag(evt, RG_TAG);
+        }
+    }
+
+    return OB_PREOP_SUCCESS;
 }

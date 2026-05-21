@@ -28,7 +28,7 @@ import time
 from collections import defaultdict, deque
 from ctypes import wintypes
 from dataclasses import dataclass
-from typing import Deque, Dict, Optional, Tuple
+from typing import Callable, Deque, Dict, List, Optional, Tuple
 
 from .base import Detector
 from scoring import Signal, Severity
@@ -39,24 +39,44 @@ from scoring import Signal, Severity
 # ---------------------------------------------------------------------------
 
 PORT_NAME = r"\RansomGuardPort"
-RG_PROTOCOL_VERSION = 1
+RG_PROTOCOL_VERSION = 2
 RG_MAX_PATH_CHARS = 520
+RG_MAX_EXTRA_CHARS = 1024
 
 # RG_EVENT_KIND
-EVENT_CREATE   = 1
-EVENT_WRITE    = 2
-EVENT_SETINFO  = 3
-EVENT_BLOCKED  = 4
+EVENT_CREATE          = 1
+EVENT_WRITE           = 2
+EVENT_SETINFO         = 3
+EVENT_BLOCKED         = 4
+EVENT_PROCESS_START   = 5
+EVENT_PROCESS_EXIT    = 6
+EVENT_REGISTRY        = 7
+EVENT_TAMPER_BLOCKED  = 8
 
 # RG_SETINFO_KIND
 SETINFO_OTHER  = 0
 SETINFO_RENAME = 1
 SETINFO_DELETE = 2
 
+# RG_REGISTRY_KIND
+REG_OTHER         = 0
+REG_SET_VALUE     = 1
+REG_DELETE_VALUE  = 2
+REG_CREATE_KEY    = 3
+REG_DELETE_KEY    = 4
+REG_RENAME_KEY    = 5
+
+# RG_TAMPER_KIND
+TAMPER_PROCESS = 1
+TAMPER_THREAD  = 2
+
 # RG_COMMAND_KIND
-CMD_QUARANTINE = 1
-CMD_RELEASE    = 2
-CMD_PING       = 3
+CMD_QUARANTINE        = 1
+CMD_RELEASE           = 2
+CMD_PING              = 3
+CMD_PROTECT_PID       = 4
+CMD_UNPROTECT_PID     = 5
+CMD_FLUSH_QUARANTINE  = 6
 
 # Thresholds for write-burst detection at the driver level.  These are
 # distinct from MassIODetector's path-based thresholds: we score per-PID,
@@ -91,16 +111,20 @@ NOISY_PATHS = (
 class RG_EVENT(ctypes.Structure):
     _pack_ = 4
     _fields_ = [
-        ("Version",      wintypes.ULONG),
-        ("Kind",         wintypes.ULONG),
-        ("SubKind",      wintypes.ULONG),
-        ("ProcessId",    wintypes.ULONG),
-        ("ThreadId",     wintypes.ULONG),
-        ("Status",       wintypes.ULONG),
-        ("WriteBytes",   ctypes.c_ulonglong),
-        ("TimestampNs",  ctypes.c_ulonglong),
-        ("PathLength",   wintypes.ULONG),
-        ("Path",         wintypes.WCHAR * RG_MAX_PATH_CHARS),
+        ("Version",         wintypes.ULONG),
+        ("Kind",            wintypes.ULONG),
+        ("SubKind",         wintypes.ULONG),
+        ("ProcessId",       wintypes.ULONG),
+        ("ParentProcessId", wintypes.ULONG),
+        ("ThreadId",        wintypes.ULONG),
+        ("Status",          wintypes.ULONG),
+        ("DesiredAccess",   wintypes.ULONG),
+        ("WriteBytes",      ctypes.c_ulonglong),
+        ("TimestampNs",     ctypes.c_ulonglong),
+        ("PathLength",      wintypes.ULONG),
+        ("ExtraLength",     wintypes.ULONG),
+        ("Path",            wintypes.WCHAR * RG_MAX_PATH_CHARS),
+        ("Extra",           wintypes.WCHAR * RG_MAX_EXTRA_CHARS),
     ]
 
 
@@ -214,6 +238,36 @@ class MinifilterBridge(Detector):
         self._lock = threading.Lock()
         self._connected_event = threading.Event()
         self._known_paths: Dict[int, str] = {}     # pid → most recent path
+        # Extra PIDs (besides our own) to tamper-protect on every connect.
+        # The agent uses this so the watchdog process also gets protected
+        # by the kernel ObCallback.
+        self._extra_protected_pids: List[int] = []
+        # Subscribers for non-file events.  Each receives an RG_EVENT.
+        # The fan-out happens on the receive thread, so subscribers must
+        # be fast and non-blocking.
+        self._process_subs: List[Callable[[RG_EVENT], None]] = []
+        self._registry_subs: List[Callable[[RG_EVENT], None]] = []
+        self._tamper_subs: List[Callable[[RG_EVENT], None]] = []
+
+    # ---------------------------------------------------------- subscribers
+
+    def subscribe_process(self, fn: Callable[[RG_EVENT], None]) -> None:
+        self._process_subs.append(fn)
+
+    def subscribe_registry(self, fn: Callable[[RG_EVENT], None]) -> None:
+        self._registry_subs.append(fn)
+
+    def subscribe_tamper(self, fn: Callable[[RG_EVENT], None]) -> None:
+        self._tamper_subs.append(fn)
+
+    def add_protected_pid(self, pid: int) -> None:
+        """Register an additional PID to be tamper-protected on every
+        (re)connect.  Used by the agent for its watchdog companion."""
+        if pid and pid not in self._extra_protected_pids:
+            self._extra_protected_pids.append(pid)
+        # If we're already connected, push it now too.
+        if self.is_connected:
+            self._send_command(CMD_PROTECT_PID, pid)
 
     # ------------------------------------------------------------------ API
 
@@ -234,6 +288,20 @@ class MinifilterBridge(Detector):
 
     def ping(self) -> bool:
         return self._send_command(CMD_PING, 0)
+
+    def protect_pid(self, pid: int) -> bool:
+        """Ask the kernel to strip PROCESS_TERMINATE / PROCESS_VM_* from
+        handles opened to ``pid`` by anyone except the process itself.
+        """
+        return self._send_command(CMD_PROTECT_PID, pid)
+
+    def unprotect_pid(self, pid: int) -> bool:
+        return self._send_command(CMD_UNPROTECT_PID, pid)
+
+    def flush_quarantine(self) -> bool:
+        """Explicitly drop every quarantined PID.  Use during clean
+        shutdown; the v2 driver does NOT auto-clear on disconnect."""
+        return self._send_command(CMD_FLUSH_QUARANTINE, 0)
 
     # ---------------------------------------------------------- detector loop
 
@@ -259,7 +327,16 @@ class MinifilterBridge(Detector):
             finally:
                 self._close()
 
-    def stop(self) -> None:
+    def stop(self, *, flush_quarantine: bool = False) -> None:
+        # A clean shutdown from the agent should release blocked PIDs so
+        # they aren't stuck on next driver reload.  An emergency stop
+        # (e.g. caught exception) should leave them blocked — that's the
+        # whole point of "sticky" quarantine in v2.
+        if flush_quarantine and self.is_connected:
+            try:
+                self.flush_quarantine()
+            except Exception:
+                pass
         super().stop()
         self._close()
 
@@ -284,6 +361,12 @@ class MinifilterBridge(Detector):
         self._port = handle
         self._connected_event.set()
         print(f"[{self.name}] connected to {self._port_name}")
+        # Tamper-protect our own PID (and any pre-registered companions)
+        # on every reconnect.  The driver's protected-PID list is sticky
+        # across our disconnects but not across driver reloads.
+        self._send_command(CMD_PROTECT_PID, self._own_pid)
+        for pid in self._extra_protected_pids:
+            self._send_command(CMD_PROTECT_PID, pid)
         return True
 
     def _close(self) -> None:
@@ -344,7 +427,55 @@ class MinifilterBridge(Detector):
     # ---- event handling ----
 
     def _handle_event(self, evt: RG_EVENT) -> None:
+        kind = int(evt.Kind)
         pid = int(evt.ProcessId)
+
+        # Fan out non-file events to subscribers before any of the
+        # file-centric noise filtering below kicks in.  Subscribers see
+        # events from every PID, including our own (so they can ignore
+        # self-events if they want).
+        if kind == EVENT_PROCESS_START or kind == EVENT_PROCESS_EXIT:
+            for sub in self._process_subs:
+                try:
+                    sub(evt)
+                except Exception as e:
+                    print(f"[{self.name}] process subscriber error: {e}")
+            return
+        if kind == EVENT_REGISTRY:
+            for sub in self._registry_subs:
+                try:
+                    sub(evt)
+                except Exception as e:
+                    print(f"[{self.name}] registry subscriber error: {e}")
+            return
+        if kind == EVENT_TAMPER_BLOCKED:
+            for sub in self._tamper_subs:
+                try:
+                    sub(evt)
+                except Exception as e:
+                    print(f"[{self.name}] tamper subscriber error: {e}")
+            # Also emit a Signal directly so it shows up on the dashboard
+            # even when no detector wraps it.
+            self.emit(Signal(
+                detector=self.name,
+                name="tamper_attempt",
+                weight=50,
+                severity=Severity.HIGH,
+                message=(f"pid={int(evt.ParentProcessId)} tried to open "
+                         f"handle to protected pid={pid} "
+                         f"(access=0x{int(evt.DesiredAccess):08X}, "
+                         f"stripped=0x{int(evt.Status):08X})"),
+                metadata={
+                    "target_pid": pid,
+                    "requester_pid": int(evt.ParentProcessId),
+                    "desired_access": int(evt.DesiredAccess),
+                    "stripped": int(evt.Status),
+                    "subkind": int(evt.SubKind),
+                },
+            ))
+            return
+
+        # ---- file events (the original v1 set) ----
         if pid == self._own_pid or pid == 0:
             return
 

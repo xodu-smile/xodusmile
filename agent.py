@@ -20,8 +20,11 @@ from detectors.mass_io import MassIODetector
 from detectors.process_cmdline import ProcessCmdlineDetector
 from detectors.process_watcher import ProcessWatcher
 from detectors.minifilter_bridge import MinifilterBridge
+from detectors.process_kernel import ProcessKernelDetector
+from detectors.registry_kernel import RegistryKernelDetector
 from responder import ProcessResponder, ResponderMode
 from incident_report import IncidentReporter
+import tamper
 
 
 class Agent:
@@ -32,16 +35,41 @@ class Agent:
                  responder_mode: ResponderMode = ResponderMode.KILL,
                  enable_minifilter: bool = True,
                  reports_dir: str = "reports",
-                 notify_user: bool = True):
+                 notify_user: bool = True,
+                 enable_tamper_protection: bool = True,
+                 watchdog_pid: int | None = None):
         self.engine = ScoringEngine()
         self.store = EventStore(db_path)
         self.engine.subscribe(self._on_signal)
+
+        # Tamper hardening that doesn't depend on the driver: critical
+        # process flag + restrictive DACLs on the DB and reports dir.
+        # Do this before opening anything else attackers could race on.
+        self._db_path = db_path
+        self._reports_dir = reports_dir
+        if enable_tamper_protection:
+            tamper.set_process_critical(True)
+            tamper.harden_paths([db_path, reports_dir])
 
         self.canary    = CanaryDetector(self.engine, watch_dirs)
         self.mass_io   = MassIODetector(self.engine, watch_dirs)
         self.proc      = ProcessCmdlineDetector(self.engine)
         self.watcher   = ProcessWatcher(self.engine)
         self.minifilter = MinifilterBridge(self.engine) if enable_minifilter else None
+
+        # Kernel-sourced detectors are bridge-driven; only useful when
+        # the minifilter is enabled.  They subscribe in their __init__
+        # so it's safe to construct even if the driver isn't loaded yet.
+        self.process_kernel: ProcessKernelDetector | None = None
+        self.registry_kernel: RegistryKernelDetector | None = None
+        if self.minifilter is not None:
+            self.process_kernel = ProcessKernelDetector(self.engine, self.minifilter)
+            self.registry_kernel = RegistryKernelDetector(self.engine, self.minifilter)
+            # Tell the kernel to tamper-protect both us and the watchdog
+            # (if we know about it).  The bridge re-sends these every
+            # time it connects, so a driver reload doesn't lose them.
+            if watchdog_pid:
+                self.minifilter.add_protected_pid(watchdog_pid)
 
         self.incident_reporter = IncidentReporter(
             self.engine,
@@ -63,6 +91,8 @@ class Agent:
         self.detectors = [self.canary, self.mass_io, self.proc, self.watcher]
         if self.minifilter is not None:
             self.detectors.append(self.minifilter)
+            self.detectors.append(self.process_kernel)
+            self.detectors.append(self.registry_kernel)
 
     def _on_signal(self, sig: Signal, score: int, level: Severity) -> None:
         bar = self._severity_bar(level)
@@ -93,10 +123,24 @@ class Agent:
 
     def stop(self) -> None:
         print("[agent] stopping...")
+        # Clean shutdown: ask the kernel driver to drop every quarantined
+        # PID so they aren't stuck on next agent start.  An unclean exit
+        # leaves the list sticky on purpose (anti-tamper default).
+        if self.minifilter is not None and self.minifilter.is_connected:
+            try:
+                self.minifilter.flush_quarantine()
+            except Exception:
+                pass
         for d in self.detectors:
             d.stop()
         try:
             self.canary.cleanup()
+        except Exception:
+            pass
+        # Drop critical-process flag so the SCM can actually stop us
+        # without a bugcheck on a clean shutdown.
+        try:
+            tamper.set_process_critical(False)
         except Exception:
             pass
         print("[agent] stopped")
@@ -154,6 +198,16 @@ def parse_args():
         "--no-notify", action="store_true",
         help="Suppress desktop notifications when a process is killed",
     )
+    p.add_argument(
+        "--no-tamper-protection", action="store_true",
+        help="Disable RtlSetProcessIsCritical + DACL hardening "
+             "(useful during dev so you can taskkill the agent)",
+    )
+    p.add_argument(
+        "--watchdog-pid", type=int, default=None,
+        help="PID of the companion watchdog process; will be kernel-"
+             "tamper-protected alongside the agent.",
+    )
     return p.parse_args()
 
 
@@ -170,6 +224,8 @@ def main():
         enable_minifilter=not args.no_minifilter,
         reports_dir=args.reports_dir,
         notify_user=not args.no_notify,
+        enable_tamper_protection=not args.no_tamper_protection,
+        watchdog_pid=args.watchdog_pid,
     )
     agent.start()
 

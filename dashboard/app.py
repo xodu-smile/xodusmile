@@ -20,6 +20,15 @@ def create_app(agent):
     def api_status():
         return jsonify(agent.status())
 
+    @app.route("/api/heartbeat")
+    def api_heartbeat():
+        # Lightweight liveness probe used by the watchdog service.  We
+        # touch the engine's internal state (taking a single lock) so a
+        # deep deadlock surfaces here even when the bare HTTP listener
+        # is still answering.
+        score = agent.engine.current_score()
+        return jsonify({"ok": True, "score": score})
+
     @app.route("/api/events")
     def api_events():
         return jsonify({"events": agent.store.recent(100)})

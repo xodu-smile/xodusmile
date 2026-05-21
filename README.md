@@ -126,6 +126,26 @@ multi-GB install.
 
 ## Run
 
+### As a service (recommended for any real test)
+
+```powershell
+# Installs RansomGuardAgent + RansomGuardWatchdog services, configures
+# SCM auto-restart on failure, locks service + data-dir DACLs to
+# SYSTEM/Admins, starts both.
+.\scripts\install_services.ps1 -WatchDirs 'C:\Users'
+
+# Uninstall.
+.\scripts\uninstall_services.ps1
+```
+
+The agent runs under LocalSystem with `RtlSetProcessIsCritical` set
+and is registered with the kernel driver's `ObCallback` for handle-
+access stripping; the watchdog polls the agent every 5 s and restarts
+it on crash or missed heartbeat.  Data lives at
+`C:\ProgramData\RansomGuard\`.
+
+### As a CLI (dev / one-off)
+
 ```powershell
 .\.venv\Scripts\Activate.ps1
 
@@ -137,6 +157,9 @@ python agent.py --mode off --no-dashboard
 
 # Quarantine but do not terminate.
 python agent.py --mode quarantine
+
+# Dev convenience: skip tamper hardening so taskkill works.
+python agent.py --no-tamper-protection
 ```
 
 CLI flags:
