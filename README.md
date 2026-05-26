@@ -38,33 +38,43 @@ process the moment it crosses a threshold.
 ## Architecture
 
 ```
-                       +--------------------+
-                       |  RansomGuard.sys   |   (kernel minifilter)
-                       |  IRP_MJ_CREATE /   |
-                       |  WRITE / SETINFO   |
-                       +---------+----------+
-                                 | filter port (\RansomGuardPort)
-                                 v
-   +-----------------+    +---------------------+    +-------------------+
-   |   detectors:    |    |   minifilter_bridge |    |   responder       |
-   |   canary        |--> |   (ctypes -> fltlib)|    |   - quarantine    |
-   |   mass_io       |    +----------+----------+    |   - terminate     |
-   |   process_*     |               |               +-------------------+
-   +--------+--------+               v                          ^
-            |              +---------------------+              |
-            +------------> |   ScoringEngine     | -------------+
-                           |   (rolling 120s)    |
-                           +----------+----------+
-                                      |
+                       +-----------------------------+
+                       |     RansomGuard.sys         |  (kernel minifilter)
+                       |  IRP file ops · Ps callback |
+                       |  Cm callback  · Ob callback |
+                       +--------------+--------------+
+                                      | filter port (\RansomGuardPort)
                                       v
-                           +---------------------+
-                           |   EventStore (SQLite)|
-                           +---------------------+
-                                      |
-                                      v
-                           +---------------------+
-                           |   Flask dashboard   |
-                           +---------------------+
+   +-----------------+      +---------------------+      +-------------------+
+   |  user-mode      |      |  minifilter_bridge  |      |    responder      |
+   |  detectors:     |      |  (ctypes -> fltlib) |<---> |  - quarantine     |
+   |   canary        |----->+----------+----------+      |  - terminate      |
+   |   mass_io       |                 |                 +---------+---------+
+   |   process_*     |                 v                           |
+   +--------+--------+      +---------------------+                |
+            |               |  process_kernel     |                |
+            |               |  registry_kernel    |                |
+            |               +----------+----------+                |
+            |                          |                           |
+            +-----------+------------- v --------------------------+
+                        v       +---------------------+
+                 +------+-----+ |   ScoringEngine     |<--+
+                 |   tamper   | |   (rolling 120s)    |   |
+                 +------------+ +----------+----------+   |
+                                           |              |
+                                           v              |
+                                +---------------------+   |
+                                |  EventStore (SQLite)|   |
+                                +----------+----------+   |
+                                           |              |
+                              +------------+------------+ |
+                              v                         v |
+                +---------------------+    +---------------------+
+                |   Flask dashboard   |    |   incident_report   |
+                +---------------------+    |  (markdown + notif) |
+                            ^              +---------------------+
+                            |
+                            +--- watchdog_service (heartbeat / restart)
 ```
 
 | Component                        | Role                                            |
@@ -76,10 +86,16 @@ process the moment it crosses a threshold.
 | `detectors/mass_io.py`           | Watchdog-based bulk I/O + entropy + magic-byte  |
 | `detectors/process_cmdline.py`   | WMI process-create rules (VSS/BCD/Defender/…)   |
 | `detectors/process_watcher.py`   | psutil polling, LOLBin chains, fan-out          |
+| `detectors/process_kernel.py`    | Kernel-callback process-create detector (no WMI)|
+| `detectors/registry_kernel.py`   | Kernel-callback registry-write detector         |
 | `scoring.py`                     | Weighted, time-windowed signal aggregation      |
 | `responder.py`                   | Quarantine + terminate suspicious PIDs          |
+| `incident_report.py`             | Markdown incident reports + desktop notification|
+| `tamper.py`                      | Critical-process flag + DACL hardening          |
 | `event_store.py`                 | SQLite persistence                              |
 | `dashboard/app.py`               | Flask UI + `/api/*`                             |
+| `service.py`                     | Windows service host (`RansomGuardAgent`)       |
+| `watchdog_service.py`            | Sidecar service that restarts the agent on hang |
 
 ## Requirements
 
@@ -164,24 +180,31 @@ python agent.py --no-tamper-protection
 
 CLI flags:
 
-| Flag                | Effect                                                                 |
-|---------------------|------------------------------------------------------------------------|
-| `--watch <dir>`     | Directory to monitor (repeatable). Default: `./test_watch_dir`.        |
-| `--mode {off,quarantine,kill}` | Responder mode. Default `kill`.                              |
-| `--no-minifilter`   | Skip the kernel bridge (user-mode-only detection).                     |
-| `--no-dashboard`    | Don't start the Flask UI.                                              |
-| `--port N`          | Dashboard port (default `5000`).                                       |
-| `--db PATH`         | SQLite path (default `detector.db`).                                   |
+| Flag                            | Effect                                                                                 |
+|---------------------------------|----------------------------------------------------------------------------------------|
+| `--watch <dir>`                 | Directory to monitor (repeatable). Default: `./test_watch_dir`.                        |
+| `--mode {off,quarantine,kill}`  | Responder mode. Default `kill`.                                                        |
+| `--no-minifilter`               | Skip the kernel bridge (user-mode-only detection).                                     |
+| `--no-dashboard`                | Don't start the Flask UI.                                                              |
+| `--port N`                      | Dashboard port (default `5000`).                                                       |
+| `--db PATH`                     | SQLite path (default `detector.db`).                                                   |
+| `--reports-dir PATH`            | Where to write markdown incident reports (default `./reports`).                        |
+| `--no-notify`                   | Suppress desktop notifications when a process is killed.                               |
+| `--no-tamper-protection`        | Disable `RtlSetProcessIsCritical` + DACL hardening (useful in dev so you can taskkill).|
+| `--watchdog-pid <PID>`          | PID of the companion watchdog; will be kernel-tamper-protected alongside the agent.    |
 
 The dashboard exposes:
 
-- `GET  /api/status`     — current score, level, recent signals, responder state
-- `GET  /api/events`     — last 100 persisted signals
-- `GET  /api/processes`  — live process snapshot from the watcher
-- `GET  /api/actions`    — responder action log
-- `POST /api/kill`       — `{ "pid": 1234, "reason": "..." }` manual kill
-- `POST /api/release`    — `{ "pid": 1234 }` release a quarantined PID
-- `POST /api/reset`      — reset the scoring window
+- `GET  /api/status`             — current score, level, recent signals, responder state
+- `GET  /api/heartbeat`          — liveness probe used by `watchdog_service` (200 OK)
+- `GET  /api/events`             — last 100 persisted signals
+- `GET  /api/processes`          — live process snapshot from the watcher
+- `GET  /api/actions`            — responder action log
+- `GET  /api/reports`            — list markdown incident reports under `--reports-dir`
+- `GET  /api/reports/<filename>` — fetch a single incident report by filename
+- `POST /api/kill`               — `{ "pid": 1234, "reason": "..." }` manual kill
+- `POST /api/release`            — `{ "pid": 1234 }` release a quarantined PID
+- `POST /api/reset`              — reset the scoring window
 
 ## Validation
 
@@ -191,7 +214,10 @@ python demo_inproc.py
 
 # Standalone simulator: writes random bytes to dummy files in the watch dir
 # and renames them with .encrypted — NO real cryptography is performed.
-python tests\simulator.py --scenario {canary|encrypt|full}
+# vss / bcd inject fake cmdline events through ProcessCmdlineDetector.submit_external
+# (no real vssadmin/bcdedit is ever spawned).  stealth uses a slow encryption
+# pace to evade the burst threshold but still trips magic/entropy/extension.
+python tests\simulator.py --scenario {populate|encrypt|canary|vss|bcd|full|stealth}
 ```
 
 Neither runs real `vssadmin` / `bcdedit` commands; cmdline rules are
