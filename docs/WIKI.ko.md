@@ -21,15 +21,22 @@ API를 노출하는지, 런타임에서 어디에 위치하는지를 정리한�
    │  - mass_io         │  └─────────────┘   │  - terminate         │
    │  - process_cmdline │                    └──────────┬───────────┘
    │  - process_watcher │                               │ on_action
-   │  - minifilter      │◄──── 커널 이벤트 ───┐         ▼
-   └────────────────────┘                     │   ┌────────────────┐
-            ▲                                 │   │ IncidentReport │
-            │                                 │   │  - .md 작성     │
-            │                                 │   │  - 사용자 알림   │
-   ┌────────┴────────┐                ┌───────┴───┐└────────────────┘
-   │ Flask Dashboard │                │ RansomGuard│
-   │  (브라우저 UI)  │                 │ minifilter │
-   └─────────────────┘                │   (.sys)   │
+   │  - process_kernel  │◄──── 커널 이벤트 ───┐         ▼
+   │  - registry_kernel │                     │   ┌────────────────┐
+   │  - minifilter_bridge│                    │   │ IncidentReport │
+   └────────────────────┘                     │   │  - .md 작성     │
+            ▲                                 │   │  - 사용자 알림   │
+            │                                 │   └────────────────┘
+   ┌────────┴────────┐                ┌───────┴───┐
+   │ Flask Dashboard │                │ RansomGuard│       ┌──────────┐
+   │  (브라우저 UI)  │                 │ minifilter │       │  tamper  │
+   └─────────────────┘                │   (.sys)   │       │ (변조방지)│
+                                      └────────────┘       └──────────┘
+                                            ▲
+                                            │ heartbeat / 재기동
+                                      ┌─────┴──────┐
+                                      │ watchdog_  │
+                                      │  service   │
                                       └────────────┘
 ```
 
@@ -59,6 +66,9 @@ ransomware_detector/
 ├── event_store.py                 # SQLite 영구 저장
 ├── responder.py                   # 격리 + 프로세스 종료
 ├── incident_report.py             # Markdown 리포트 + 알림
+├── tamper.py                      # 자가 변조 방지 (Critical 플래그 + DACL)
+├── service.py                     # Windows 서비스 호스트 (RansomGuardAgent)
+├── watchdog_service.py            # 사이드카 서비스, Agent heartbeat/재기동
 ├── demo_inproc.py                 # 종단 데모(대시보드 없이)
 ├── __init__.py                    # 패키지 마커
 ├── detectors/
@@ -68,13 +78,15 @@ ransomware_detector/
 │   ├── mass_io.py                 # 파일 이벤트 버스트 + 엔트로피
 │   ├── process_cmdline.py         # WMI + 정규식 룰셋
 │   ├── process_watcher.py         # psutil 폴링, 부모-자식 체인
+│   ├── process_kernel.py          # 커널 콜백 기반 프로세스 생성 탐지 (WMI 미사용)
+│   ├── registry_kernel.py         # 커널 콜백 기반 레지스트리 쓰기 탐지
 │   └── minifilter_bridge.py       # 유저모드 드라이버 클라이언트
 ├── dashboard/
 │   └── app.py                     # Flask 앱(라우트 + JSON API)
 ├── tests/
 │   └── simulator.py               # 안전한 행위 시뮬레이터
 ├── minifilter/
-│   ├── RansomGuard.h              # 드라이버 ↔ 유저모드 계약
+│   ├── RansomGuard.h              # 드라이버 ↔ 유저모드 계약 (v2)
 │   ├── RansomGuard.c              # 커널 minifilter
 │   ├── RansomGuard.inf / .sln / .vcxproj
 ├── scripts/
@@ -82,8 +94,10 @@ ransomware_detector/
 │   ├── bootstrap.ps1              # Python + venv 설치
 │   ├── build_driver.ps1           # MSBuild 래퍼
 │   ├── install_driver.ps1         # .sys 적재 + 서비스 시작
+│   ├── install_services.ps1       # Agent + Watchdog 서비스 등록 + DACL 락
 │   ├── install.ps1                # bootstrap + 드라이버 일괄
-│   └── uninstall_driver.ps1       # 드라이버 중지/제거
+│   ├── uninstall_driver.ps1       # 드라이버 중지/제거
+│   └── uninstall_services.ps1     # Agent + Watchdog 서비스 제거
 └── reports/                       # (런타임 생성) .md 인시던트
 ```
 
@@ -97,13 +111,13 @@ CLI 진입점. 모든 구성요소를 연결하고 메인 루프를 돈다.
 
 | API | 설명 |
 |-----|------|
-| `class Agent(watch_dirs, *, db_path, responder_mode, enable_minifilter, reports_dir, notify_user)` | 모든 디텍터, 스코어링 엔진, 이벤트 스토어, 리스폰더, 인시던트 리포터를 소유. |
+| `class Agent(watch_dirs, *, db_path, responder_mode, enable_minifilter, reports_dir, notify_user, enable_tamper_protection, watchdog_pid)` | 모든 디텍터(커널 콜백 기반 포함), 스코어링 엔진, 이벤트 스토어, 리스폰더, 인시던트 리포터, 변조 방지 훅을 소유. |
 | `Agent.start()` | Canary 배치 후 모든 디텍터 스레드 시작. |
 | `Agent.stop()` | 디텍터 중지, canary 파일 정리. |
 | `Agent.status()` | 점수+레벨+최근 시그널+리스폰더+인시던트 스냅샷 (`/api/status`에서 소비). |
 | `Agent.processes(limit)` | `ProcessWatcher.snapshot` 패스스루. |
 | `Agent._on_signal(sig, score, level)` | 출력 + 저장. |
-| `parse_args()` / `main()` | CLI 옵션: `--watch`, `--db`, `--no-dashboard`, `--port`, `--mode`, `--no-minifilter`, `--reports-dir`, `--no-notify`. |
+| `parse_args()` / `main()` | CLI 옵션: `--watch`, `--db`, `--no-dashboard`, `--port`, `--mode`, `--no-minifilter`, `--reports-dir`, `--no-notify`, `--no-tamper-protection`, `--watchdog-pid`. |
 
 `python agent.py` 실행 흐름: `parse_args` → `Agent` 생성 →
 `agent.start()` → 선택적으로 데몬 스레드에서 Flask 대시보드 기동 →
@@ -194,7 +208,60 @@ Windows 종료 전략: 먼저 `psutil.kill()`, 그래도 안 끝나면 ctypes �
 
 ---
 
-### 3.6 `demo_inproc.py`
+### 3.6 `tamper.py`
+
+자가 변조 방지 헬퍼. Agent 시작 시 적용되는 best-effort 방어 3계층.
+Windows 외에서는 모두 no-op.
+
+| API | 설명 |
+|-----|------|
+| `is_windows()` | 플랫폼 가드. |
+| `set_process_critical(enable=True)` | `ntdll!RtlSetProcessIsCritical` 호출. critical 프로세스를 죽이면 BSOD → "조용한 종료" 봉쇄. SeDebugPrivilege 필요 (LocalSystem 서비스에선 자동). |
+| `harden_paths(paths)` | SQLite DB, reports 폴더 등에 SYSTEM/Administrators 만 접근하도록 DACL 설정. 일반 사용자 공격 차단. |
+
+가장 강력한 보호는 별도로 커널 측 `ObCallback` (드라이버가
+`MinifilterBridge.add_protected_pid` 로 등록) — 핸들 access mask 박탈로
+SYSTEM 권한 공격도 차단.
+
+---
+
+### 3.7 `service.py`
+
+`RansomGuardAgent` Windows 서비스 호스트. `pywin32` 의
+`servicemanager` 를 사용해서 SCM 에 등록하고 LocalSystem 권한으로
+Agent 를 실행한다.
+
+| API | 설명 |
+|-----|------|
+| `SERVICE_NAME = "RansomGuardAgent"` | SCM 식별자. |
+| `_load_params_from_registry()` | `HKLM\…\Services\RansomGuardAgent\Parameters` 에서 `WatchDirs`, `DbPath`, `ReportsDir`, `Mode` 읽기. 키 부재 시 기본값 폴백. |
+| `RansomGuardService.SvcDoRun()` | Agent 구성 → `start()` → stop 이벤트 대기 → `stop()`. |
+| `install` / `start` / `stop` / `remove` | 표준 pywin32 서비스 커맨드. |
+
+`scripts/install_services.ps1` 이 이 모듈을 호출해서 SCM recovery
+옵션 (auto-restart on failure) 까지 함께 설정한다.
+
+---
+
+### 3.8 `watchdog_service.py`
+
+`RansomGuardWatchdog` 사이드카 서비스. Agent 서비스가 살아 있고
+응답 가능한지 5초마다 검증, 죽었거나 hang 이면 SCM 으로 재기동.
+
+| API | 설명 |
+|-----|------|
+| `WATCHDOG_INTERVAL_SECS = 5` | 폴링 주기. |
+| `HEARTBEAT_MISS_THRESHOLD = 3` | 연속 미응답 임계 — 넘으면 강제 재기동. |
+| `_check_agent_state()` | SCM 으로 Agent 서비스 현재 상태 조회. `RUNNING` / `START_PENDING` 아니면 start 요청. |
+| `_check_heartbeat()` | `http://127.0.0.1:5000/api/heartbeat` GET. 3회 연속 실패면 stop → SCM 자동 재시작 트리거. |
+
+상호 보호: Agent 가 부팅하면서 자신의 watchdog PID 를 커널
+`ObCallback` 에 protect 등록 → Agent 와 Watchdog 둘 다 죽이려면 SCM
+권한이나 BSOD 가 필요해진다.
+
+---
+
+### 3.9 `demo_inproc.py`
 
 단일 프로세스 종단 데모: `Agent` 부팅 → 더미 파일 배치 → 가짜
 VSS/BCD 이벤트 주입 → canary touch → 암호화 시뮬레이션 → 통계 출력.
@@ -202,7 +269,7 @@ VSS/BCD 이벤트 주입 → canary touch → 암호화 시뮬레이션 → 통�
 
 ---
 
-### 3.7 `__init__.py`
+### 3.10 `__init__.py`
 
 빈 파일 — 저장소를 패키지로 인식시켜 `import scoring`,
 `from detectors.base import …` 가 스크립트/모듈 양쪽에서 동작하게 한다.
@@ -328,18 +395,63 @@ LOLBin 체인 탐지, 단일 프로세스 I/O 버스트, 대시보드 프로세�
 
 | API | 설명 |
 |-----|------|
-| `class RG_EVENT(ctypes.Structure)` | 커널 `RG_EVENT` 패킷의 거울. |
+| `class RG_EVENT(ctypes.Structure)` | 커널 `RG_EVENT` 패킷의 거울. v2: `ParentProcessId`, `DesiredAccess`, `Extra[1024]` 필드 추가. |
 | `RG_MESSAGE = FILTER_MESSAGE_HEADER + RG_EVENT` | `FilterGetMessage` 단일 버퍼 레이아웃. |
-| `RG_COMMAND`, `RG_REPLY` | 격리/해제/ping 용 아웃바운드 컨트롤 패킷. |
+| `RG_COMMAND`, `RG_REPLY` | 컨트롤 플레인 — 격리/해제/ping/PID 보호/언보호/격리 플러시. |
 | `_load_fltlib()` | `fltlib.dll` 로드 + `FilterConnectCommunicationPort/FilterGetMessage/FilterSendMessage` 바인딩. Windows 외/DLL 부재 시 `None`. |
 | `MinifilterBridge.is_connected` | 포트 오픈 여부. |
 | `quarantine_pid(pid)` / `release_pid(pid)` / `ping()` | `RG_COMMAND` 전송 후 `RG_REPLY.Status == 0` 확인. |
-| `run()` | 지수 백오프 (1s → 30s) 재연결 루프. `_receive_loop` 에서 `FilterGetMessage` 블로킹, `Version == RG_PROTOCOL_VERSION` 검증 후 `_handle_event` 디스패치. |
-| `_handle_event(evt)` | kind 별: `BLOCKED` → `kernel_blocked_op` (weight 60, HIGH); `WRITE` → `_account_write`; `SETINFO/RENAME` → `_account_rename`; `SETINFO/DELETE` → `file_delete` (LOW, weight 3); `CREATE` → 경로만 기록. |
+| `add_protected_pid(pid)` / `remove_protected_pid(pid)` / `flush_quarantine()` | v2 추가: 자가 보호 등록 / 해제, 모든 격리 일괄 해제. |
+| `subscribe_process(cb)` / `subscribe_registry(cb)` | `process_kernel`, `registry_kernel` 디텍터가 콜백 등록 시 사용. |
+| `run()` | 지수 백오프 (1s → 30s) 재연결 루프. `_receive_loop` 에서 `FilterGetMessage` 블로킹, `Version == RG_PROTOCOL_VERSION (=2)` 검증 후 `_handle_event` 디스패치. |
+| `_handle_event(evt)` | kind 별 분기 (8가지): `CREATE` → 경로 기록 / `WRITE` → `_account_write` / `SETINFO/RENAME` → `_account_rename` / `SETINFO/DELETE` → `file_delete` (LOW, weight 3) / `BLOCKED` → `kernel_blocked_op` (weight 60, HIGH) / `PROCESS_START`, `PROCESS_EXIT` → `subscribe_process` 콜백 / `REGISTRY` → `subscribe_registry` 콜백 / `TAMPER_BLOCKED` → `tamper_blocked` 시그널. |
 | `_account_write(...)` | PID 별 슬라이딩 윈도우 (`PID_WRITE_BURST_BYTES=75 MB`, `WINDOW=4 s`). 트립 시 `kernel_write_burst` (weight 35, HIGH), 4s 디바운스. |
 | `_account_rename(...)` | PID 별 슬라이딩 윈도우 (`PID_RENAME_BURST_COUNT=20`, `WINDOW=5 s`). `kernel_rename_burst` (weight 40, HIGH). |
 
 드라이버 부재 시 브리지는 idle, 유저모드 디텍터만으로도 동작.
+
+---
+
+### 4.7 `detectors/process_kernel.py`
+
+`MinifilterBridge` 의 `PROCESS_START`/`PROCESS_EXIT` 이벤트
+(`PsSetCreateProcessNotifyRoutineEx` 출처) 를 구독해서 WMI 없이 프로세스
+생성을 감지하는 디텍터. `process_cmdline.py` 의 `RULES` 와 동일한
+정규식을 `evaluate_cmdline` 으로 공유 적용.
+
+| API | 설명 |
+|-----|------|
+| `ProcessKernelDetector(engine, bridge)` | 생성 시 `bridge.subscribe_process(self._on_process_event)` 로 등록. 자체 스레드 없음 (브리지 receive 스레드에서 콜백). |
+| `_on_process_event(evt)` | `RG_EVENT.Extra` 의 커맨드라인을 꺼내 `evaluate_cmdline(...)` → 매칭되면 `Signal` emit. |
+| `run()` | no-op — 콜백 기반이므로 stop 이벤트만 대기. |
+
+**왜 WMI 대신**: (1) WMI 폴링은 50–500 ms 지연 + 부하 시 누락, (2) 커널
+콜백은 동기적으로 새 프로세스 첫 명령 실행 전 발화, (3) 커맨드라인을
+커널 메모리에서 가져오므로 PEB 위조로 못 숨김, (4) WMI 윈도우보다
+빨리 죽는 단명 프로세스도 잡힘.
+
+`process_cmdline` 과 동시 활성 시 같은 룰이 두 번 발화 가능 — 시그널
+`name` + `weight` 기준이라 무해.
+
+---
+
+### 4.8 `detectors/registry_kernel.py`
+
+`MinifilterBridge` 의 `REGISTRY` 이벤트 (`CmRegisterCallbackEx` 출처)
+를 구독. 드라이버가 watch 리스트로 미리 필터해서 올려보내므로,
+디텍터는 키 경로를 라벨로 매핑만.
+
+| 패턴 (소문자 부분 매치) | 시그널 | weight | severity |
+|--------------------------|--------|-------:|----------|
+| `\system\currentcontrolset\services\ransomguard` | `ransomguard_service_tamper` | 80 | CRITICAL |
+| `\windefend`, `\wdfilter`, `\sense` 등 | `defender_*_tamper` | 70 | CRITICAL |
+| `\image file execution options` | `ifeo_hijack` | 60 | HIGH |
+| `\currentversion\run(once)?` | `run_key_persistence` | 30 | MEDIUM |
+| `\schedule\taskcache` | `schtasks_persistence` | 35 | MEDIUM |
+| 매치 없음 | `registry_other` | 1 | LOW (텔레메트리) |
+
+순서는 첫 매치가 이김. 매치 안 되는 이벤트도 LOW 시그널로 흘려서
+텔레메트리를 잃지 않게 한다.
 
 ---
 
@@ -351,6 +463,7 @@ LOLBin 체인 탐지, 단일 프로세스 I/O 버스트, 대시보드 프로세�
 |-------|--------|------|
 | `/` | GET | `templates/index.html` 렌더. |
 | `/api/status` | GET | `agent.status()` JSON. |
+| `/api/heartbeat` | GET | `watchdog_service` 가 호출하는 라이브니스 프로브 (200 OK). |
 | `/api/events` | GET | `EventStore` 최근 100개. |
 | `/api/processes` | GET | `ProcessWatcher.snapshot(60)`. |
 | `/api/actions` | GET | `ProcessResponder.actions(100)`. |
@@ -394,12 +507,19 @@ HTML 템플릿은 고정 위치 토스트 컨테이너를 두고 2.5s 마다
 공유 계약. 드라이버와 `detectors/minifilter_bridge.py` 양쪽이 이
 레이아웃을 포함 — 동기화 유지가 중요. 주요 정의:
 
-- `RG_PORT_NAME = L"\\RansomGuardPort"`, altitude `385201`, 프로토콜 버전 `1`, 최대 경로 520 WCHAR.
-- `RG_EVENT_KIND`: `RgEventCreate(1)`, `RgEventWrite(2)`, `RgEventSetInfo(3)`, `RgEventBlocked(4)`.
+- `RG_PORT_NAME = L"\\RansomGuardPort"`, altitude `385201`, **프로토콜 버전 `2`**, 최대 경로 520 WCHAR, 보조 버퍼 `Extra[1024]`.
+- `RG_EVENT_KIND` (8가지): `RgEventCreate(1)`, `RgEventWrite(2)`, `RgEventSetInfo(3)`, `RgEventBlocked(4)`, **`RgEventProcessStart(5)`**, **`RgEventProcessExit(6)`**, **`RgEventRegistry(7)`**, **`RgEventTamperBlocked(8)`**.
 - `RG_SETINFO_KIND`: `Other/Rename/Delete`.
-- `RG_EVENT` (`#pragma pack(4)`): `Version, Kind, SubKind, ProcessId, ThreadId, Status, WriteBytes (u64), TimestampNs (u64), PathLength, Path[520 WCHAR]`.
-- `RG_COMMAND_KIND`: `RgCmdQuarantinePid(1)`, `RgCmdReleasePid(2)`, `RgCmdPing(3)`.
+- `RG_REGISTRY_KIND`: `Other/SetValue/DeleteValue/CreateKey/DeleteKey/RenameKey`.
+- `RG_TAMPER_KIND`: `Process(1)/Thread(2)`.
+- `RG_EVENT` (`#pragma pack(4)`, v2): `Version, Kind, SubKind, ProcessId, **ParentProcessId**, ThreadId, Status, **DesiredAccess**, WriteBytes (u64), TimestampNs (u64), PathLength, **ExtraLength**, Path[520 WCHAR], **Extra[1024 WCHAR]** (커맨드라인 또는 레지스트리 값 이름).
+- `RG_COMMAND_KIND` (6가지): `RgCmdQuarantinePid(1)`, `RgCmdReleasePid(2)`, `RgCmdPing(3)`, **`RgCmdProtectPid(4)`**, **`RgCmdUnprotectPid(5)`**, **`RgCmdFlushQuarantine(6)`**.
 - `RG_COMMAND` / `RG_REPLY`: 컨트롤 플레인 구조체.
+
+v1 → v2 변경 요약: 프로세스 생성/종료 이벤트 + 레지스트리 이벤트 +
+self-protection 이벤트 추가, `ParentProcessId`/`Extra` 필드 추가,
+`ProtectPid`/`UnprotectPid`/`FlushQuarantine` 명령 추가, "sticky
+quarantine" 모델 (유저모드 단절 시 격리 목록 유지).
 
 ### 7.2 `minifilter/RansomGuard.c`
 
@@ -409,11 +529,14 @@ HTML 템플릿은 고정 위치 토스트 컨테이너를 두고 2.5s 마다
 - `Filter`, `ServerPort`, `ClientPort` (리스너 1개만 허용).
 - `ClientLock` (FAST_MUTEX) — 포트 보호.
 - `QuarantineLock` (`EX_PUSH_LOCK`) — `QuarantinedPids[256]` 보호.
+- **`ProtectLock` (`EX_PUSH_LOCK`)** — `ProtectedPids[16]` 보호 (v2).
+- **`CmCallbackCookie`** — `CmRegisterCallbackEx` 등록 토큰 (v2, 레지스트리 콜백).
+- **`ObCallbackHandle`** — `ObRegisterCallbacks` 등록 핸들 (v2, 핸들 access 박탈).
 - `PerfFrequency` — 부팅 시 캐싱, ns 변환용.
 
 **라이프사이클**:
-- `DriverEntry` — `FltRegisterFilter` → 기본 SD 빌드 → `FltCreateCommunicationPort(RG_PORT_NAME, …, callbacks, max-connections=1)` → `FltStartFiltering`.
-- `RgUnload` — 포트 close, unregister, push-lock 삭제.
+- `DriverEntry` — `FltRegisterFilter` → 기본 SD 빌드 → `FltCreateCommunicationPort(RG_PORT_NAME, …, callbacks, max-connections=1)` → `FltStartFiltering` → **`PsSetCreateProcessNotifyRoutineEx`** → **`CmRegisterCallbackEx`** → **`ObRegisterCallbacks`**.
+- `RgUnload` — 포트 close, 모든 콜백 해제, unregister, push-lock 삭제.
 
 **Operation 콜백** (`Callbacks[]` 가 `IRP_MJ_CREATE`, `IRP_MJ_WRITE`, `IRP_MJ_SET_INFORMATION` 등록):
 - `RgPostCreate` — 유저모드 + 성공한 open 에 대해 `RgEventCreate` emit (드레인/커널 호출은 스킵).
@@ -422,7 +545,14 @@ HTML 템플릿은 고정 위치 토스트 컨테이너를 두고 2.5s 마다
 - `RgPreSetInfo` — `Rename`/`Delete`/`Other` 분류. `Other` 스킵. 격리 PID 의 rename/delete 는 차단; 아니면 `sub` 를 `CompletionContext` 로 전달.
 - `RgPostSetInfo` — 저장된 sub-kind 로 `RgEventSetInfo` emit.
 
+**v2 추가 콜백**:
+- **`RgCreateProcessNotify`** (`PsSetCreateProcessNotifyRoutineEx`) — 프로세스 생성/종료를 커널에서 동기 감지. 생성 시 `RG_EVENT.Extra` 에 커맨드라인을 채워 `RgEventProcessStart` emit. 종료 시 `RgEventProcessExit` + 격리 목록에서 자동 제거.
+- **`RgCmRegistryCallback`** (`CmRegisterCallbackEx`) — Defender / Run / RansomGuard 자신 등 high-value 키 변경을 watch 리스트 기반으로 사전 필터 → `RgEventRegistry` emit.
+- **`RgObPreOperation`** (`ObRegisterCallbacks`, `ObjectType=PsProcessType/PsThreadType`) — 보호 PID 에 대한 핸들 open 시 위험 권한 (`PROCESS_TERMINATE`, `PROCESS_VM_*`, `THREAD_TERMINATE` 등) 을 access mask 에서 박탈. 자기 자신 호출은 통과. 차단 시 `RgEventTamperBlocked` emit.
+
 **격리 비트맵** (`RgIsQuarantined`, `RgAddQuarantine`, `RgRemoveQuarantine`) — push-lock 아래 256 엔트리 선형 스캔. 용량 제한으로 커널 측은 단순/안전.
+
+**보호 비트맵 (v2)** (`RgIsProtected`, `RgAddProtected`, `RgRemoveProtected`) — `ProtectedPids[16]` 별도 push-lock 아래. `ObCallback` 가 핸들 open 시 빠르게 조회. v2 에서 추가된 "sticky" 모델: 유저모드 단절 시 격리 목록은 보존, 명시적 `FlushQuarantine` 명령에만 비움 (anti-tamper default).
 
 **포트 처리**:
 - `RgPortConnect` — 두 번째 리스너 거부 (`STATUS_ALREADY_REGISTERED`).
@@ -496,6 +626,23 @@ ERROR_SERVICE_ALREADY_RUNNING` 은 허용) → `fltmc filters` 중
 setupapi.dll,InstallHinfSection DefaultUninstall 132` (또는 폴백으로
 `sc.exe delete RansomGuard`) →
 `%windir%\System32\drivers\RansomGuard.sys` 삭제.
+
+### 8.7 `scripts/install_services.ps1`
+
+관리자 전용. 파라미터: `-WatchDirs`, `-Mode`, `-DashboardPort`,
+`-NoHeartbeat`. 단계:
+
+1. `service.py install` 로 `RansomGuardAgent` 등록 + `watchdog_service.py install` 로 `RansomGuardWatchdog` 등록.
+2. 각 서비스의 SCM recovery option 설정 — 1차/2차/3차 실패 모두 즉시 자동 재시작.
+3. `HKLM\…\Services\RansomGuardAgent\Parameters` 에 `WatchDirs`, `Mode`, `DashboardPort` 등 쓰기.
+4. `C:\ProgramData\RansomGuard\` 데이터 디렉토리 생성 + SYSTEM/Administrators 만 접근하도록 DACL 락.
+5. 두 서비스 `sc.exe start`.
+
+### 8.8 `scripts/uninstall_services.ps1`
+
+관리자 전용. 두 서비스를 순서대로 stop → `service.py remove` /
+`watchdog_service.py remove` 로 SCM 등록 해제. `C:\ProgramData\
+RansomGuard\` 는 보존 (수동 정리, 사고 보고서 보호 목적).
 
 ---
 

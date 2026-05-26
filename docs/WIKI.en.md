@@ -21,15 +21,22 @@ Korean edition see [`WIKI.ko.md`](./WIKI.ko.md).
    │  - mass_io         │  └─────────────┘   │  - terminate         │
    │  - process_cmdline │                    └──────────┬───────────┘
    │  - process_watcher │                               │ on_action
-   │  - minifilter      │◄──── kernel events ──┐        ▼
-   └────────────────────┘                      │   ┌────────────────┐
-            ▲                                  │   │ IncidentReport │
-            │                                  │   │  - write .md   │
-            │                                  │   │  - notify user │
-   ┌────────┴────────┐                ┌────────┴──┐└────────────────┘
-   │ Flask Dashboard │                │ RansomGuard│
-   │  (browser UI)   │                │ minifilter │
-   └─────────────────┘                │   (.sys)   │
+   │  - process_kernel  │◄──── kernel events ──┐        ▼
+   │  - registry_kernel │                      │   ┌────────────────┐
+   │  - minifilter_bridge│                     │   │ IncidentReport │
+   └────────────────────┘                      │   │  - write .md   │
+            ▲                                  │   │  - notify user │
+            │                                  │   └────────────────┘
+   ┌────────┴────────┐                ┌────────┴──┐
+   │ Flask Dashboard │                │ RansomGuard│       ┌──────────┐
+   │  (browser UI)   │                │ minifilter │       │  tamper  │
+   └─────────────────┘                │   (.sys)   │       │ (self-   │
+                                      └────────────┘       │ defense) │
+                                            ▲              └──────────┘
+                                            │ heartbeat / restart
+                                      ┌─────┴──────┐
+                                      │ watchdog_  │
+                                      │  service   │
                                       └────────────┘
 ```
 
@@ -58,6 +65,9 @@ ransomware_detector/
 ├── event_store.py                 # SQLite persistence
 ├── responder.py                   # Quarantine + process termination
 ├── incident_report.py             # Markdown report + notifications
+├── tamper.py                      # Self-defense (Critical flag + DACL hardening)
+├── service.py                     # Windows service host (RansomGuardAgent)
+├── watchdog_service.py            # Sidecar service, agent heartbeat / restart
 ├── demo_inproc.py                 # End-to-end demo (no dashboard)
 ├── __init__.py                    # Marks repo as a package
 ├── detectors/
@@ -67,13 +77,15 @@ ransomware_detector/
 │   ├── mass_io.py                 # File-event burst + entropy
 │   ├── process_cmdline.py         # WMI + regex ruleset
 │   ├── process_watcher.py         # psutil polling, parent/child chains
+│   ├── process_kernel.py          # Kernel-callback process-create detector (no WMI)
+│   ├── registry_kernel.py         # Kernel-callback registry-write detector
 │   └── minifilter_bridge.py       # User-mode driver client
 ├── dashboard/
 │   └── app.py                     # Flask app (routes + JSON API)
 ├── tests/
 │   └── simulator.py               # Safe behaviour simulator
 ├── minifilter/
-│   ├── RansomGuard.h              # Driver ↔ user-mode contract
+│   ├── RansomGuard.h              # Driver ↔ user-mode contract (v2)
 │   ├── RansomGuard.c              # Kernel minifilter
 │   ├── RansomGuard.inf / .sln / .vcxproj
 ├── scripts/
@@ -81,8 +93,10 @@ ransomware_detector/
 │   ├── bootstrap.ps1              # Python + venv install
 │   ├── build_driver.ps1           # MSBuild wrapper
 │   ├── install_driver.ps1         # Load .sys + start service
+│   ├── install_services.ps1       # Register Agent + Watchdog services + DACL lock
 │   ├── install.ps1                # bootstrap + driver convenience
-│   └── uninstall_driver.ps1       # Stop and remove driver
+│   ├── uninstall_driver.ps1       # Stop and remove driver
+│   └── uninstall_services.ps1     # Remove Agent + Watchdog services
 └── reports/                       # (created at runtime) .md incidents
 ```
 
@@ -97,13 +111,13 @@ loop.
 
 | Surface | Notes |
 |---------|-------|
-| `class Agent(watch_dirs, *, db_path, responder_mode, enable_minifilter, reports_dir, notify_user)` | Owns all detectors, the scoring engine, the event store, the responder, and the incident reporter. |
+| `class Agent(watch_dirs, *, db_path, responder_mode, enable_minifilter, reports_dir, notify_user, enable_tamper_protection, watchdog_pid)` | Owns all detectors (including kernel-callback ones), the scoring engine, the event store, the responder, the incident reporter, and the tamper-protection hooks. |
 | `Agent.start()` | Deploys canaries and starts every detector thread. |
 | `Agent.stop()` | Stops detectors, cleans up canary files. |
 | `Agent.status()` | Snapshot of score + level + recent signals + responder + incidents (consumed by `/api/status`). |
 | `Agent.processes(limit)` | Pass-through to `ProcessWatcher.snapshot`. |
 | `Agent._on_signal(sig, score, level)` | Print + persist. |
-| `parse_args()` / `main()` | CLI: `--watch`, `--db`, `--no-dashboard`, `--port`, `--mode`, `--no-minifilter`, `--reports-dir`, `--no-notify`. |
+| `parse_args()` / `main()` | CLI: `--watch`, `--db`, `--no-dashboard`, `--port`, `--mode`, `--no-minifilter`, `--reports-dir`, `--no-notify`, `--no-tamper-protection`, `--watchdog-pid`. |
 
 Flow on `python agent.py`: `parse_args` → build `Agent` → `agent.start()`
 → optionally launch Flask dashboard in a daemon thread → install
@@ -196,7 +210,61 @@ File names: `incident_<YYYYMMDD_HHMMSS>_pid<N>_<safe_name>.md`.
 
 ---
 
-### 3.6 `demo_inproc.py`
+### 3.6 `tamper.py`
+
+Self-defense helpers applied at agent startup. Best-effort layered
+defences; all no-op outside Windows.
+
+| Surface | Notes |
+|---------|-------|
+| `is_windows()` | Platform guard. |
+| `set_process_critical(enable=True)` | Calls `ntdll!RtlSetProcessIsCritical`. Killing a critical process bug-checks the box → silent termination is no longer possible. Requires SeDebugPrivilege (auto-granted under LocalSystem). |
+| `harden_paths(paths)` | Restricts the SQLite DB and reports directory to SYSTEM/Administrators via DACL. Blocks non-admin attackers. |
+
+The strongest layer is the kernel-side `ObCallback` (registered by the
+driver via `MinifilterBridge.add_protected_pid`) — strips handle access
+mask bits even from SYSTEM-level attackers.
+
+---
+
+### 3.7 `service.py`
+
+`RansomGuardAgent` Windows service host. Uses pywin32's
+`servicemanager` to register with the SCM and run the agent under
+LocalSystem.
+
+| Surface | Notes |
+|---------|-------|
+| `SERVICE_NAME = "RansomGuardAgent"` | SCM identifier. |
+| `_load_params_from_registry()` | Reads `WatchDirs`, `DbPath`, `ReportsDir`, `Mode` from `HKLM\…\Services\RansomGuardAgent\Parameters`, falls back to sensible defaults. |
+| `RansomGuardService.SvcDoRun()` | Builds the Agent, calls `start()`, waits on the stop event, calls `stop()`. |
+| `install` / `start` / `stop` / `remove` | Standard pywin32 service verbs. |
+
+`scripts/install_services.ps1` invokes this module and also configures
+SCM recovery options (auto-restart on failure).
+
+---
+
+### 3.8 `watchdog_service.py`
+
+`RansomGuardWatchdog` sidecar service. Every 5 seconds, verifies the
+agent service is running and responsive; if not, restarts it via the
+SCM.
+
+| Surface | Notes |
+|---------|-------|
+| `WATCHDOG_INTERVAL_SECS = 5` | Poll cadence. |
+| `HEARTBEAT_MISS_THRESHOLD = 3` | Consecutive misses before a forced restart. |
+| `_check_agent_state()` | Queries SCM for the agent service state. If not `RUNNING` / `START_PENDING`, asks the SCM to start it. |
+| `_check_heartbeat()` | GETs `http://127.0.0.1:5000/api/heartbeat`. Three consecutive failures → stop the service so the SCM auto-restarts it. |
+
+Mutual protection: at startup the agent registers the watchdog PID
+with the kernel `ObCallback` — killing either now requires SCM
+privileges or a bug-check.
+
+---
+
+### 3.9 `demo_inproc.py`
 
 Single-process end-to-end demo: boot `Agent`, populate dummies, inject
 fake VSS / BCD events, touch a canary, run the encryption simulator,
@@ -205,7 +273,7 @@ dashboard or driver.
 
 ---
 
-### 3.7 `__init__.py`
+### 3.10 `__init__.py`
 
 Empty — marks the repo as a package so internal `import scoring`,
 `from detectors.base import …` work when run as scripts or modules.
@@ -334,19 +402,66 @@ the binary protocol declared in `minifilter/RansomGuard.h`.
 
 | Surface | Notes |
 |---------|-------|
-| `class RG_EVENT(ctypes.Structure)` | Mirrors the kernel `RG_EVENT` packet. |
+| `class RG_EVENT(ctypes.Structure)` | Mirrors the kernel `RG_EVENT` packet. v2 adds `ParentProcessId`, `DesiredAccess`, `Extra[1024]`. |
 | `RG_MESSAGE = FILTER_MESSAGE_HEADER + RG_EVENT` | Single-buffer layout used by `FilterGetMessage`. |
-| `RG_COMMAND`, `RG_REPLY` | Outbound control packets for quarantine/release/ping. |
+| `RG_COMMAND`, `RG_REPLY` | Control plane — quarantine/release/ping/protect-pid/unprotect-pid/flush-quarantine. |
 | `_load_fltlib()` | Loads `fltlib.dll` and binds `FilterConnectCommunicationPort`, `FilterGetMessage`, `FilterSendMessage`. Returns `None` off Windows or if the DLL is missing. |
 | `MinifilterBridge.is_connected` | True once the port is open. |
 | `quarantine_pid(pid)` / `release_pid(pid)` / `ping()` | Send `RG_COMMAND` and check `RG_REPLY.Status == 0`. |
-| `run()` | Reconnect loop with exponential backoff (1 s → 30 s). Inside `_receive_loop`, blocks on `FilterGetMessage`, validates `Version == RG_PROTOCOL_VERSION`, dispatches to `_handle_event`. |
-| `_handle_event(evt)` | Per kind: `BLOCKED` → emit `kernel_blocked_op` (weight 60, HIGH); `WRITE` → `_account_write`; `SETINFO/RENAME` → `_account_rename`; `SETINFO/DELETE` → emit `file_delete` (LOW, weight 3); `CREATE` → record path only. |
+| `add_protected_pid(pid)` / `remove_protected_pid(pid)` / `flush_quarantine()` | v2 additions: register/unregister self-protection, bulk-release every quarantined PID. |
+| `subscribe_process(cb)` / `subscribe_registry(cb)` | Hooks used by `process_kernel` and `registry_kernel` detectors. |
+| `run()` | Reconnect loop with exponential backoff (1 s → 30 s). Inside `_receive_loop`, blocks on `FilterGetMessage`, validates `Version == RG_PROTOCOL_VERSION (=2)`, dispatches to `_handle_event`. |
+| `_handle_event(evt)` | Per kind (8 kinds): `CREATE` → record path / `WRITE` → `_account_write` / `SETINFO/RENAME` → `_account_rename` / `SETINFO/DELETE` → emit `file_delete` (LOW, weight 3) / `BLOCKED` → emit `kernel_blocked_op` (weight 60, HIGH) / `PROCESS_START`, `PROCESS_EXIT` → `subscribe_process` callbacks / `REGISTRY` → `subscribe_registry` callbacks / `TAMPER_BLOCKED` → emit `tamper_blocked`. |
 | `_account_write(...)` | Per-PID rolling window (`PID_WRITE_BURST_BYTES=75 MB`, `WINDOW=4 s`). When tripped emits `kernel_write_burst` (weight 35, HIGH), debounced for 4 s. |
 | `_account_rename(...)` | Per-PID rolling window (`PID_RENAME_BURST_COUNT=20`, `WINDOW=5 s`). Emits `kernel_rename_burst` (weight 40, HIGH). |
 
 When the driver is missing the bridge stays idle; the user-mode-only
 detectors continue to work.
+
+---
+
+### 4.7 `detectors/process_kernel.py`
+
+Subscribes to the bridge's `PROCESS_START` / `PROCESS_EXIT` events
+(sourced from `PsSetCreateProcessNotifyRoutineEx`) and detects process
+creation without WMI. Shares the regex `RULES` from
+`process_cmdline.py` via `evaluate_cmdline`.
+
+| Surface | Notes |
+|---------|-------|
+| `ProcessKernelDetector(engine, bridge)` | On construction, registers via `bridge.subscribe_process(self._on_process_event)`. No own thread — invoked from the bridge's receive thread. |
+| `_on_process_event(evt)` | Reads the command line from `RG_EVENT.Extra`, calls `evaluate_cmdline(...)`, emits a `Signal` on match. |
+| `run()` | No-op — callback-driven, just waits on the stop event. |
+
+**Why over WMI**: (1) WMI polling has 50–500 ms latency and is lossy
+under load, (2) the kernel callback fires synchronously before the new
+process executes a single instruction, (3) command line comes from
+kernel memory, so PEB tampering cannot hide it, (4) short-lived
+processes that die faster than WMI's polling window are no longer
+invisible.
+
+When `process_cmdline` is also active the same rule may fire twice —
+harmless because scoring is keyed by signal `name` + `weight`.
+
+---
+
+### 4.8 `detectors/registry_kernel.py`
+
+Subscribes to the bridge's `REGISTRY` events (sourced from
+`CmRegisterCallbackEx`). The driver pre-filters against a watch list,
+so the detector's job is just to map a key path to a labelled signal.
+
+| Pattern (lower-case substring match) | Signal | weight | severity |
+|---------------------------------------|--------|-------:|----------|
+| `\system\currentcontrolset\services\ransomguard` | `ransomguard_service_tamper` | 80 | CRITICAL |
+| `\windefend`, `\wdfilter`, `\sense` etc. | `defender_*_tamper` | 70 | CRITICAL |
+| `\image file execution options` | `ifeo_hijack` | 60 | HIGH |
+| `\currentversion\run(once)?` | `run_key_persistence` | 30 | MEDIUM |
+| `\schedule\taskcache` | `schtasks_persistence` | 35 | MEDIUM |
+| no match | `registry_other` | 1 | LOW (telemetry) |
+
+First match wins. Unmatched events still emit a LOW telemetry signal
+so we don't silently drop them.
 
 ---
 
@@ -358,6 +473,7 @@ A small Flask app, mounted in-process by `agent.py`.
 |-------|--------|---------|
 | `/` | GET | Render `templates/index.html`. |
 | `/api/status` | GET | `agent.status()` JSON. |
+| `/api/heartbeat` | GET | Liveness probe used by `watchdog_service` (200 OK). |
 | `/api/events` | GET | Last 100 rows from `EventStore`. |
 | `/api/processes` | GET | `ProcessWatcher.snapshot(60)`. |
 | `/api/actions` | GET | `ProcessResponder.actions(100)`. |
@@ -403,12 +519,20 @@ else's filesystem.
 Shared contract.  Both the driver and `detectors/minifilter_bridge.py`
 include this layout — keep them in sync.  Highlights:
 
-- `RG_PORT_NAME = L"\\RansomGuardPort"`, altitude `385201`, protocol version `1`, max path 520 WCHARs.
-- `RG_EVENT_KIND`: `RgEventCreate(1)`, `RgEventWrite(2)`, `RgEventSetInfo(3)`, `RgEventBlocked(4)`.
+- `RG_PORT_NAME = L"\\RansomGuardPort"`, altitude `385201`, **protocol version `2`**, max path 520 WCHARs, auxiliary `Extra[1024]` buffer.
+- `RG_EVENT_KIND` (8 kinds): `RgEventCreate(1)`, `RgEventWrite(2)`, `RgEventSetInfo(3)`, `RgEventBlocked(4)`, **`RgEventProcessStart(5)`**, **`RgEventProcessExit(6)`**, **`RgEventRegistry(7)`**, **`RgEventTamperBlocked(8)`**.
 - `RG_SETINFO_KIND`: `Other/Rename/Delete`.
-- `RG_EVENT` (`#pragma pack(4)`): `Version, Kind, SubKind, ProcessId, ThreadId, Status, WriteBytes (u64), TimestampNs (u64), PathLength, Path[520 WCHAR]`.
-- `RG_COMMAND_KIND`: `RgCmdQuarantinePid(1)`, `RgCmdReleasePid(2)`, `RgCmdPing(3)`.
+- `RG_REGISTRY_KIND`: `Other/SetValue/DeleteValue/CreateKey/DeleteKey/RenameKey`.
+- `RG_TAMPER_KIND`: `Process(1)/Thread(2)`.
+- `RG_EVENT` (`#pragma pack(4)`, v2): `Version, Kind, SubKind, ProcessId, ParentProcessId, ThreadId, Status, DesiredAccess, WriteBytes (u64), TimestampNs (u64), PathLength, ExtraLength, Path[520 WCHAR], Extra[1024 WCHAR]` (command line or registry value name).
+- `RG_COMMAND_KIND` (6 kinds): `RgCmdQuarantinePid(1)`, `RgCmdReleasePid(2)`, `RgCmdPing(3)`, **`RgCmdProtectPid(4)`**, **`RgCmdUnprotectPid(5)`**, **`RgCmdFlushQuarantine(6)`**.
 - `RG_COMMAND` / `RG_REPLY`: control plane structures.
+
+v1 → v2 summary: added process create/exit, registry, and self-protection
+events; added `ParentProcessId` and a secondary `Extra` buffer; added
+`ProtectPid`/`UnprotectPid`/`FlushQuarantine` commands; adopted a
+"sticky quarantine" model (the quarantine list is preserved when the
+user-mode bridge disconnects).
 
 ### 7.2 `minifilter/RansomGuard.c`
 
@@ -418,11 +542,14 @@ Compact minifilter — keeps logic out of the kernel.
 - `Filter`, `ServerPort`, `ClientPort` (single connected listener).
 - `ClientLock` (FAST_MUTEX) protects the port.
 - `QuarantineLock` (`EX_PUSH_LOCK`) protects `QuarantinedPids[256]`.
+- **`ProtectLock` (`EX_PUSH_LOCK`)** protects `ProtectedPids[16]` (v2).
+- **`CmCallbackCookie`** — `CmRegisterCallbackEx` registration handle (v2, registry callback).
+- **`ObCallbackHandle`** — `ObRegisterCallbacks` handle (v2, handle-access stripping).
 - `PerfFrequency` cached at boot for ns conversion.
 
 **Lifecycle**:
-- `DriverEntry` — `FltRegisterFilter`, build a default security descriptor, `FltCreateCommunicationPort(RG_PORT_NAME, …, callbacks, max-connections=1)`, `FltStartFiltering`.
-- `RgUnload` — close the port, unregister, delete the push-lock.
+- `DriverEntry` — `FltRegisterFilter`, build a default security descriptor, `FltCreateCommunicationPort(RG_PORT_NAME, …, callbacks, max-connections=1)`, `FltStartFiltering`, **`PsSetCreateProcessNotifyRoutineEx`**, **`CmRegisterCallbackEx`**, **`ObRegisterCallbacks`**.
+- `RgUnload` — close the port, unregister every callback, delete the push-locks.
 
 **Operation callbacks** (`Callbacks[]` registers `IRP_MJ_CREATE`, `IRP_MJ_WRITE`, `IRP_MJ_SET_INFORMATION`):
 - `RgPostCreate` — emit `RgEventCreate` on user-mode, successful opens (drains and kernel callers are skipped).
@@ -431,7 +558,14 @@ Compact minifilter — keeps logic out of the kernel.
 - `RgPreSetInfo` — classify as `Rename`, `Delete`, or `Other`. Skip `Other`. Block quarantined PIDs on rename/delete; otherwise pass `sub` via `CompletionContext`.
 - `RgPostSetInfo` — emit `RgEventSetInfo` with the saved sub-kind.
 
+**v2 additional callbacks**:
+- **`RgCreateProcessNotify`** (`PsSetCreateProcessNotifyRoutineEx`) — synchronously detects process create/exit in the kernel. On create, fills `RG_EVENT.Extra` with the command line and emits `RgEventProcessStart`. On exit, emits `RgEventProcessExit` and auto-removes the PID from the quarantine list.
+- **`RgCmRegistryCallback`** (`CmRegisterCallbackEx`) — pre-filters high-value key changes (Defender / Run / RansomGuard service) against a watch list and emits `RgEventRegistry`.
+- **`RgObPreOperation`** (`ObRegisterCallbacks`, `ObjectType=PsProcessType/PsThreadType`) — strips dangerous access rights (`PROCESS_TERMINATE`, `PROCESS_VM_*`, `THREAD_TERMINATE` etc.) from handles opened to protected PIDs by other callers. Self-callers pass through. Emits `RgEventTamperBlocked` on strip.
+
 **Quarantine bitmap** (`RgIsQuarantined`, `RgAddQuarantine`, `RgRemoveQuarantine`) — linear scan over a 256-entry array under a push-lock. Capacity-bounded so the kernel side stays trivially safe.
+
+**Protected bitmap (v2)** (`RgIsProtected`, `RgAddProtected`, `RgRemoveProtected`) — separate `ProtectedPids[16]` under its own push-lock. Queried by `ObCallback` on handle-open. v2 also introduces the "sticky" model: the quarantine list is preserved when user mode disconnects and is only cleared on an explicit `FlushQuarantine` command (anti-tamper default).
 
 **Port plumbing**:
 - `RgPortConnect` — refuse a second listener (`STATUS_ALREADY_REGISTERED`).
@@ -507,6 +641,24 @@ Admin-only.  `sc.exe stop RansomGuard` → `rundll32
 setupapi.dll,InstallHinfSection DefaultUninstall 132` (or `sc.exe
 delete RansomGuard` as a fallback) → removes
 `%windir%\System32\drivers\RansomGuard.sys`.
+
+### 8.7 `scripts/install_services.ps1`
+
+Admin-only.  Parameters: `-WatchDirs`, `-Mode`, `-DashboardPort`,
+`-NoHeartbeat`.  Steps:
+
+1. `service.py install` registers `RansomGuardAgent`; `watchdog_service.py install` registers `RansomGuardWatchdog`.
+2. Configures SCM recovery options on both services — first/second/subsequent failures all trigger an immediate auto-restart.
+3. Writes `WatchDirs`, `Mode`, `DashboardPort` etc. under `HKLM\…\Services\RansomGuardAgent\Parameters`.
+4. Creates the `C:\ProgramData\RansomGuard\` data directory and locks the DACL to SYSTEM/Administrators only.
+5. `sc.exe start` for both services.
+
+### 8.8 `scripts/uninstall_services.ps1`
+
+Admin-only.  Stops both services in order, then removes them via
+`service.py remove` / `watchdog_service.py remove`.
+`C:\ProgramData\RansomGuard\` is intentionally preserved (manual
+cleanup, protects incident reports).
 
 ---
 

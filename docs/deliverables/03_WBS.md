@@ -35,7 +35,7 @@
 | 코드 | 활동 | 산출물 |
 |------|------|--------|
 | 1.2.1 | 컴포넌트 데이터 흐름 설계 (커널→Bridge→Detector→Scoring→Responder) | 아키텍처 다이어그램 |
-| 1.2.2 | `RG_EVENT` / `RG_COMMAND` 바이너리 프로토콜 v1 확정 | `minifilter/RansomGuard.h` |
+| 1.2.2 | `RG_EVENT`(8종) / `RG_COMMAND`(6종) 바이너리 프로토콜 v2 확정 | `minifilter/RansomGuard.h` |
 | 1.2.3 | 스코어링 모델 (120s 윈도우, 4단계 임계) | `scoring.py` 상수 |
 | 1.2.4 | SQLite 스키마 + 인덱스 설계 | `event_store.py` |
 | 1.2.5 | Flask API 계약 (/api/status/events/processes/...) | `dashboard/app.py` |
@@ -63,10 +63,12 @@
 | 1.4.3 | `MassIODetector` (엔트로피·매직·rename·fan-out) | `detectors/mass_io.py` |
 | 1.4.4 | `ProcessCmdlineDetector` (WMI 정규식 RULES) | `detectors/process_cmdline.py` |
 | 1.4.5 | `ProcessWatcher` (psutil LOLBin 체인) | `detectors/process_watcher.py` |
-| 1.4.6 | `ScoringEngine` + `EventStore` | `scoring.py`, `event_store.py` |
-| 1.4.7 | `ProcessResponder` (OFF/QUARANTINE/KILL) | `responder.py` |
-| 1.4.8 | `IncidentReporter` (MD + 토스트 + OS 알림) | `incident_report.py` |
-| 1.4.9 | `tamper.py` (Process Critical, 핸들 보호) | `tamper.py` |
+| 1.4.6 | `ProcessKernelDetector` (커널 콜백 cmdline 룰, WMI 미사용) | `detectors/process_kernel.py` |
+| 1.4.7 | `RegistryKernelDetector` (커널 콜백 레지스트리 watch) | `detectors/registry_kernel.py` |
+| 1.4.8 | `ScoringEngine` + `EventStore` | `scoring.py`, `event_store.py` |
+| 1.4.9 | `ProcessResponder` (OFF/QUARANTINE/KILL) | `responder.py` |
+| 1.4.10 | `IncidentReporter` (MD + 토스트 + OS 알림) | `incident_report.py` |
+| 1.4.11 | `tamper.py` (Process Critical, DACL 강화) | `tamper.py` |
 
 ### 1.5 통합 / 배포 / 검증
 
