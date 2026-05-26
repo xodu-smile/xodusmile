@@ -251,10 +251,6 @@ python tests\simulator.py --scenario {populate|encrypt|canary|vss|bcd|full|steal
 두 도구 모두 **진짜 `vssadmin` 이나 `bcdedit` 을 실행하지 않습니다.**
 cmdline 룰은 `ProcessCmdlineDetector.submit_external` 을 통해 가짜 이벤트로만 검증됩니다.
 
-> 🍎 **macOS / Linux 에서도 일부 작동:** 카나리, mass_io, 시뮬레이터의 cmdline 인젝션은
-> Mac/Linux 에서도 동작합니다. 커널 드라이버·WMI·tamper 같은 Windows 전용 기능은
-> graceful 하게 idle 상태로 들어가요.
-
 ---
 
 ## 🗑️ 제거 (Uninstall)
