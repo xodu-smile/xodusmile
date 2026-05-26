@@ -1,19 +1,19 @@
 # RansomGuard EDR (Windows 11)
 
-> 🌐 영문 버전: [README.en.md](./README.en.md)
+> 영문 버전: [README.en.md](./README.en.md)
 
 Windows 11용 **랜섬웨어 전용 소형 EDR** 입니다.
 커널 모드 **파일시스템 미니필터** 와 사용자 모드 **행동 기반 탐지기들** 을
 조합하고, 점수가 임계치를 넘는 순간 의심 프로세스를 **격리(quarantine)** 하거나
 **즉시 종료(kill)** 할 수 있는 **자동 대응(active responder)** 까지 갖췄어요.
 
-> ⚠️ **이건 연구/학습용 프로토타입입니다.**
+> **이건 연구/학습용 프로토타입입니다.**
 > 본인 소유의 머신, 가급적이면 격리된 VM에서만 돌리세요.
 > 드라이버를 로드하려면 테스트 서명이 활성화돼 있거나 정식 서명된 카탈로그가 있어야 합니다.
 
 ---
 
-## 🎯 한 줄 요약
+## 한 줄 요약
 
 > "**랜섬웨어가 본격적으로 파일을 잠그기 직전의 사전 행동들** 을
 > 커널·사용자 모드 양쪽에서 감지해서, 점수가 임계치를 넘으면
@@ -21,21 +21,21 @@ Windows 11용 **랜섬웨어 전용 소형 EDR** 입니다.
 
 ---
 
-## ✨ 주요 기능 (Features)
+## 주요 기능 (Features)
 
 | 분류 | 설명 |
 |---|---|
-| 🧠 **커널 미니필터** | `minifilter/RansomGuard.sys` 드라이버가 모든 볼륨에서 `IRP_MJ_CREATE`, `IRP_MJ_WRITE`, `IRP_MJ_SET_INFORMATION` 을 가로채요. `(pid, path, op, bytes)` 형식 이벤트를 필터 통신 포트로 사용자 모드에 스트리밍하고, 격리된 PID 의 후속 쓰기/이름변경을 **커널 안에서 차단** 합니다. |
-| 💥 **PID 단위 폭발 감지** | minifilter_bridge 가 PID 별로 쓰기 바이트와 rename 횟수를 누적해요. 짧은 시간 안에 폭증하면 어느 폴더든 상관없이 HIGH 신호 발생. |
-| 🪤 **카나리 파일** | 사용자가 절대 안 건드릴 미끼 파일을 깔아두고 해시로 감시. 변경 시 **단발로 CRITICAL** 발사. |
-| 🎤 **프로세스 명령어 룰** | VSS 섀도카피 삭제, BCD 변조, Defender 비활성화, 로그 삭제, BitLocker 해제, 흔한 PowerShell 난독화 패턴 등 22개 룰. |
-| 👥 **프로세스 트리 휴리스틱** | LOLBin 부모-자식 체인(Office → PowerShell, 브라우저 → 스크립트 호스트), 한 부모가 짧은 시간 안에 자식을 다수 spawn 하는 fan-out, psutil 기반 디스크 쓰기 burst. |
-| ⚡ **자동 대응 (Active Responder)** | 3가지 모드 — `off` / `quarantine` / `kill`. `kill` 모드에서 PID 가 명시된 HIGH/CRITICAL 신호가 발생하면 즉시 커널 격리 + `TerminateProcess`. **lsass, csrss 같은 시스템 핵심 프로세스는 절대 안 죽이는 하드코딩 목록** 으로 보호. |
-| 🖥️ **Flask 대시보드** | `http://127.0.0.1:5000` — 실시간 점수, 최근 이벤트, 프로세스 목록, 자동 대응 로그, 수동 kill/release 버튼. |
+| **커널 미니필터** | `minifilter/RansomGuard.sys` 드라이버가 모든 볼륨에서 `IRP_MJ_CREATE`, `IRP_MJ_WRITE`, `IRP_MJ_SET_INFORMATION` 을 가로채요. `(pid, path, op, bytes)` 형식 이벤트를 필터 통신 포트로 사용자 모드에 스트리밍하고, 격리된 PID 의 후속 쓰기/이름변경을 **커널 안에서 차단** 합니다. |
+| **PID 단위 폭발 감지** | minifilter_bridge 가 PID 별로 쓰기 바이트와 rename 횟수를 누적해요. 짧은 시간 안에 폭증하면 어느 폴더든 상관없이 HIGH 신호 발생. |
+| **카나리 파일** | 사용자가 절대 안 건드릴 미끼 파일을 깔아두고 해시로 감시. 변경 시 **단발로 CRITICAL** 발사. |
+| **프로세스 명령어 룰** | VSS 섀도카피 삭제, BCD 변조, Defender 비활성화, 로그 삭제, BitLocker 해제, 흔한 PowerShell 난독화 패턴 등 22개 룰. |
+| **프로세스 트리 휴리스틱** | LOLBin 부모-자식 체인(Office → PowerShell, 브라우저 → 스크립트 호스트), 한 부모가 짧은 시간 안에 자식을 다수 spawn 하는 fan-out, psutil 기반 디스크 쓰기 burst. |
+| **자동 대응 (Active Responder)** | 3가지 모드 — `off` / `quarantine` / `kill`. `kill` 모드에서 PID 가 명시된 HIGH/CRITICAL 신호가 발생하면 즉시 커널 격리 + `TerminateProcess`. **lsass, csrss 같은 시스템 핵심 프로세스는 절대 안 죽이는 하드코딩 목록** 으로 보호. |
+| **Flask 대시보드** | `http://127.0.0.1:5000` — 실시간 점수, 최근 이벤트, 프로세스 목록, 자동 대응 로그, 수동 kill/release 버튼. |
 
 ---
 
-## 🏗️ 동작 구조 (Architecture)
+## 동작 구조 (Architecture)
 
 > 큰 그림: **커널이 모든 파일 작업을 가로채서** → 사용자 모드로 보내고 → 탐지기들이 점수 매기고 → 임계 넘으면 자동 대응.
 
@@ -79,7 +79,7 @@ Windows 11용 **랜섬웨어 전용 소형 EDR** 입니다.
                             +--- watchdog_service (헬스체크 / 재시작)
 ```
 
-### 🔑 핵심 아이디어: 점수 누적 방식
+### 핵심 아이디어: 점수 누적 방식
 
 신호 하나로 결론 내지 않아요. **120초 슬라이딩 윈도우** 안의 모든 신호 점수를
 합산해서 등급을 판정합니다.
@@ -96,7 +96,7 @@ Windows 11용 **랜섬웨어 전용 소형 EDR** 입니다.
 
 ---
 
-## 📁 파일 구성 (Components)
+## 파일 구성 (Components)
 
 | 파일 | 역할 |
 |---|---|
@@ -120,19 +120,19 @@ Windows 11용 **랜섬웨어 전용 소형 EDR** 입니다.
 
 ---
 
-## 💻 실행 환경 (Requirements)
+## 실행 환경 (Requirements)
 
 - **OS:** Windows 11 (22H2 이상), x64
 - **사용자 모드:** Python 3.10+ x64
 - **커널 빌드:** Visual Studio 2022 Build Tools (C++ 워크로드) + Windows Driver Kit (WDK 10.0.26100 이상)
 - **드라이버 로드:** 테스트 서명 활성화 또는 `RansomGuard.sys` 정식 서명 카탈로그
 
-> 💡 **드라이버 없이도 사용자 모드 에이전트만 단독 실행 가능** 합니다.
+> **드라이버 없이도 사용자 모드 에이전트만 단독 실행 가능** 합니다.
 > 단, 커널 레벨 파일 I/O 신호는 못 받아요 (그 부분만 동작 안 함).
 
 ---
 
-## 📥 설치 (Install)
+## 설치 (Install)
 
 **관리자 권한 PowerShell** 에서 저장소 루트 위치에 실행:
 
@@ -164,7 +164,7 @@ WDK 나 VS Build Tools 가 없으면 스크립트가 **무인 설치하지 않�
 
 ---
 
-## 🚀 실행 방법 (Run)
+## 실행 방법 (Run)
 
 ### 방법 1: 서비스로 실행 (실제 테스트 추천)
 
@@ -233,7 +233,7 @@ python agent.py --no-tamper-protection
 
 ---
 
-## ✅ 테스트 / 검증 (Validation)
+## 테스트 / 검증 (Validation)
 
 ```powershell
 # In-process 데모: 에이전트 띄우고 안전한 모의 이벤트를 자동 주입
@@ -253,7 +253,7 @@ cmdline 룰은 `ProcessCmdlineDetector.submit_external` 을 통해 가짜 이벤
 
 ---
 
-## 🗑️ 제거 (Uninstall)
+## 제거 (Uninstall)
 
 ```powershell
 .\scripts\uninstall_driver.ps1
@@ -262,7 +262,7 @@ Remove-Item -Recurse -Force .\.venv
 
 ---
 
-## ⚠️ 안전 안내 (Safety)
+## 안전 안내 (Safety)
 
 - **Responder 는 프로세스를 진짜로 종료합니다.**
   자동화 랩에서는 기본값 `kill` 모드가 적합하지만, 일반 데스크톱에서는
@@ -275,7 +275,7 @@ Remove-Item -Recurse -Force .\.venv
 
 ---
 
-## 🚧 미구현 / 향후 과제 (Known gaps)
+## 미구현 / 향후 과제 (Known gaps)
 
 - **Authenticode 화이트리스트 없음.**
   Responder 가 이론적으로는 노이즈가 많아 보이는 서명된 정상 프로세스를
@@ -287,7 +287,7 @@ Remove-Item -Recurse -Force .\.venv
 
 ---
 
-## 📚 추가 자료
+## 추가 자료
 
 - 영문 README: [`README.en.md`](./README.en.md)
 - 상세 위키 (한글): [`docs/WIKI.ko.md`](./docs/WIKI.ko.md)
