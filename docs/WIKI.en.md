@@ -47,8 +47,10 @@ Signals flow **into** the `ScoringEngine`.  Three listeners are attached:
 2. `MassIODetector._on_engine_signal` — listens for `canary` trips and
    raises its own entropy / burst thresholds for 30 seconds.
 3. `ProcessResponder._dispatch` — when a HIGH/CRITICAL signal names a
-   PID, asks the kernel to quarantine and then terminates the process;
-   also sweeps PIDs when the rolling score crosses CRITICAL.
+   PID *and clears the confidence bar*, asks the kernel to quarantine and
+   then terminates that one PID. There is no score-wide sweep: it turned
+   isolated false positives into mass kills (see the responder docstring
+   and the dispatch row below).
 
 The responder fires `on_action(KillAction)` for every action; the
 `IncidentReporter` uses that hook to write a Markdown incident report

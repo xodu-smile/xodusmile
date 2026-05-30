@@ -85,23 +85,76 @@ PID_WRITE_BURST_BYTES   = 75 * 1024 * 1024
 PID_WRITE_BURST_WINDOW  = 4.0
 PID_RENAME_BURST_COUNT  = 20
 PID_RENAME_BURST_WINDOW = 5.0
-# Paths that generate noise but aren't malicious - skip event processing
-NOISY_PATHS = (
+# Noisy paths fall into two classes, and conflating them was a real bug: the
+# old single list short-circuited the handler *before* per-PID byte/rename
+# accounting, so a sample that wrote inside any of these dirs never counted
+# toward kernel_write_burst — directly contradicting this detector's "score
+# per-PID, regardless of directory" contract and opening an evasion: stage the
+# encryption under, say, %LOCALAPPDATA%\Microsoft\Windows\ and stay invisible.
+#
+# BURST_EXEMPT_PATHS: dirs where a benign, *non-FULL-trust* actor genuinely
+# produces high write/rename volume — Windows Update via svchost
+# (SoftwareDistribution), browser cache, VSS, installers in %WINDIR%\Temp.
+# FULL-trust actors (TiWorker, Defender, WMI) are already exempted by the
+# actor-trust layer, but svchost/browsers are not, so counting their churn here
+# would fire kernel_write_burst.  These keep the full early-skip.
+BURST_EXEMPT_PATHS = (
     "\\appdata\\local\\google\\chrome\\",
     "\\appdata\\local\\microsoft\\edge\\",
-    "\\appdata\\local\\microsoft\\windows\\",
-    "\\appdata\\roaming\\microsoft\\windows\\recent\\",
     "\\windows\\softwaredistribution\\",
     "\\windows\\system32\\config\\",
     "\\windows\\temp\\",
+    "\\windows\\systemtemp\\",
     "\\windows\\winsxs\\",
-    "\\$recycle.bin\\",
+    "\\windows\\inf\\",
+    "\\system32\\wbem\\performance\\",
+    "\\system32\\wbem\\autorecover\\",
     "\\system volume information\\",
     "\\indexeddb\\",
     "\\cache_data\\",
+)
+
+# SINGLE_EVENT_NOISE_PATHS: dirs that emit lone housekeeping deletes/creates but
+# where a sustained *burst* is NOT a normal pattern.  We still feed per-PID
+# byte/rename accounting here (so encryption staged in one of these is caught)
+# and only drop the lone-delete telemetry that would otherwise be noise.
+SINGLE_EVENT_NOISE_PATHS = (
+    "\\appdata\\local\\microsoft\\windows\\",
+    "\\appdata\\roaming\\microsoft\\windows\\recent\\",
+    "\\$recycle.bin\\",
     "\\jumplisticons",
     "\\customdestinations",
 )
+
+# Our own on-disk artifacts.  Several of these are created/deleted by
+# *short-lived helper invocations* (e.g. ``python postmortem.py`` snapshots
+# the event DB into ``%TEMP%\pm_db_<rand>\snapshot.db`` and then deletes the
+# whole temp dir), so the deleting PID is NOT this process and the
+# ``pid == self._own_pid`` guard above does not catch them.
+#
+# Matching is deliberately tight so we don't widen the evasion surface: a
+# bare substring like ``detector.db`` would also swallow events under an
+# attacker-named folder (``C:\detector.db_x\victim.docx``).  We require the
+# pm_db temp dir as a path *segment*, and match the DB itself on *basename*
+# (incl. -journal/-wal/-shm sidecars) only.
+_SELF_DIR_SEGMENTS = ("pm_db_",)               # temp dir name *prefix*
+_SELF_DB_BASENAMES = ("snapshot.db", "detector.db")  # basename prefix (+ sidecars)
+
+
+def _is_self_artifact(path_lower: str) -> bool:
+    # A pm_db_ temp dir holds nothing but our snapshot, so the whole subtree
+    # is ours.  Require it as a real path segment ("\pm_db_") so it can't be
+    # matched as a substring of an unrelated leaf filename.
+    for seg in _SELF_DIR_SEGMENTS:
+        if ("\\" + seg) in path_lower:
+            return True
+    # The live DB and its SQLite sidecars: match on basename only, never as a
+    # substring of an attacker-controlled directory name.
+    base = path_lower.rsplit("\\", 1)[-1]
+    for db in _SELF_DB_BASENAMES:
+        if base == db or base.startswith(db + "-"):  # db, db-journal/-wal/-shm
+            return True
+    return False
 
 # ---------------------------------------------------------------------------
 # ctypes layout
@@ -483,12 +536,22 @@ class MinifilterBridge(Detector):
         if path:
             self._known_paths[pid] = path
         now = time.time()
-        # Skip noisy system paths (browser caches, Windows internals, etc.)
+        # Classify the path's noise level.  BURST_EXEMPT dirs (servicing,
+        # browser cache, VSS) are skipped entirely — even their high volume is
+        # benign churn from a non-FULL-trust actor.  SINGLE_EVENT_NOISE dirs
+        # still feed per-PID burst accounting (so encryption staged there is
+        # caught); only their lone-delete telemetry is dropped below.
+        single_event_noise = False
         if path:
             path_lower = path.lower()
-            for noisy in NOISY_PATHS:
-                if noisy in path_lower:
-                    return
+            if any(p in path_lower for p in BURST_EXEMPT_PATHS):
+                return
+            # Drop our own DB/snapshot artifacts regardless of which PID
+            # touched them (postmortem helpers run as separate processes).
+            if _is_self_artifact(path_lower):
+                return
+            single_event_noise = any(p in path_lower
+                                     for p in SINGLE_EVENT_NOISE_PATHS)
 
         if evt.Kind == EVENT_BLOCKED:
             self.emit(Signal(
@@ -509,6 +572,12 @@ class MinifilterBridge(Detector):
             if int(evt.SubKind) == SETINFO_RENAME:
                 self._account_rename(pid, path, now)
             elif int(evt.SubKind) == SETINFO_DELETE:
+                # Lone deletes in known housekeeping dirs are pure noise (and
+                # already correlation-gated in scoring), so we drop them here to
+                # keep telemetry clean — the per-PID rename/write bursts above
+                # are what catch a sample operating in these dirs.
+                if single_event_noise:
+                    return
                 # Single deletes are noisy; we emit only at LOW severity so
                 # the scoring engine can fold them in alongside other signals.
                 self.emit(Signal(

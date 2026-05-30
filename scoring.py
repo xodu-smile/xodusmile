@@ -65,6 +65,13 @@ ENCRYPTION_SIGNAL_NAMES = frozenset({
     "kernel_write_burst", "kernel_rename_burst", "kernel_blocked_op",
 })
 
+# 단독으로는 점수에 기여하지 않고, "같은 PID 가 실제 암호화/파괴 활동을
+# 보일 때에만" 가중되는 시그널들.  단일 파일 삭제는 가장 흔한 정상 행위
+# (temp 청소, 앱 하우스키핑)라 그 자체로는 위협이 아니다 — read→encrypt→
+# 원본삭제 패턴의 일부일 때에만 의미를 갖는다.  깨끗한 샌드박스에서 OS
+# 하우스키핑 삭제가 점수를 CRITICAL 까지 밀어올리던 인플레의 주범이었다.
+CORRELATION_GATED_NAMES = frozenset({"file_delete"})
+
 
 class ScoringEngine:
     """
@@ -72,12 +79,19 @@ class ScoringEngine:
     임계값을 넘으면 등록된 콜백(예: 대시보드 알림, 차단 액션)을 호출한다.
     """
 
-    def __init__(self, window_seconds: int = SIGNAL_WINDOW_SECONDS):
+    def __init__(self, window_seconds: int = SIGNAL_WINDOW_SECONDS,
+                 *, is_trusted_actor: Optional[Callable[["Signal"], bool]] = None):
         self._signals: deque[Signal] = deque()
         self._lock = threading.Lock()
         self._window = window_seconds
         self._listeners: List[Callable[[Signal, int, Severity], None]] = []
         self._last_alert_level: Severity = Severity.INFO
+        # Optional actor-trust classifier.  When set, a signal whose actor
+        # resolves to a trusted system component (Defender, servicing, WMI…)
+        # is stamped at submit time and excluded from the score so normal OS
+        # housekeeping can't inflate the global level.  Injected by the agent;
+        # left None in tests so scoring stays a pure function of weights.
+        self._is_trusted_actor = is_trusted_actor
 
     def subscribe(self, listener: Callable[[Signal, int, Severity], None]) -> None:
         """시그널 발생 시 호출될 콜백 등록. (signal, current_score, threat_level)"""
@@ -85,6 +99,17 @@ class ScoringEngine:
 
     def submit(self, signal: Signal) -> None:
         """탐지기가 시그널을 보고할 때 호출."""
+        # Classify the actor once, here, outside the lock — resolving a PID's
+        # image path can hit the OS, and we must not do that while holding the
+        # scoring lock on the detector hot path.  The result is stamped onto
+        # the signal so all the locked math below is pure dict lookups.
+        if self._is_trusted_actor is not None and "actor_trusted" not in signal.metadata:
+            try:
+                signal.metadata["actor_trusted"] = bool(self._is_trusted_actor(signal))
+            except Exception as e:
+                print(f"[scoring] actor-trust classifier error: {e}")
+                signal.metadata["actor_trusted"] = False
+
         with self._lock:
             self._signals.append(signal)
             self._evict_old()
@@ -122,6 +147,12 @@ class ScoringEngine:
             for s in self._signals:
                 if s is exclude:
                     continue
+                # A trusted system actor's burst (e.g. TiWorker writing an
+                # update, Defender scanning) must not corroborate a heuristic
+                # flagged against an unrelated PID — that would turn benign OS
+                # activity into a kill.  Skip it here too, not just in scoring.
+                if self._trusted(s):
+                    continue
                 if s.name in ENCRYPTION_SIGNAL_NAMES:
                     return True
         return False
@@ -137,8 +168,51 @@ class ScoringEngine:
         while self._signals and self._signals[0].timestamp < cutoff:
             self._signals.popleft()
 
+    @staticmethod
+    def _pid_of(sig: "Signal") -> Optional[int]:
+        meta = sig.metadata or {}
+        for key in ("pid", "ProcessId", "process_id", "child_pid"):
+            val = meta.get(key)
+            if isinstance(val, int) and val > 0:
+                return val
+        return None
+
+    @staticmethod
+    def _trusted(sig: "Signal") -> bool:
+        """Was this signal's actor classified as a trusted system component
+        at submit time?  Stamped by ``submit`` when a classifier is wired."""
+        return bool((sig.metadata or {}).get("actor_trusted"))
+
     def _current_score_locked(self) -> int:
-        return sum(s.weight for s in self._signals)
+        # PID 단위 상관: 실제 암호화/파괴 시그널을 낸 PID 집합.  메타에 pid 가
+        # 없는 암호화 시그널(예: canary)은 보수적으로 상관에서 제외 — 점수를
+        # 부풀리지 않는 쪽으로.  신뢰 시스템 actor 의 시그널은 enc_pids 에도
+        # 넣지 않는다 — 정상 OS 활동이 다른 PID 의 휴리스틱을 상관시키면 안 됨.
+        enc_pids = set()
+        for s in self._signals:
+            if self._trusted(s):
+                continue
+            if s.name in ENCRYPTION_SIGNAL_NAMES:
+                p = self._pid_of(s)
+                if p is not None:
+                    enc_pids.add(p)
+
+        total = 0
+        for s in self._signals:
+            # 신뢰 시스템 actor (Defender 자기설정 쓰기, WMI/perf 재구축,
+            # 서비싱 svchost/TiWorker 등) 는 점수에 합산하지 않는다.  이것이
+            # 깨끗한 OS 가 부팅마다 CRITICAL 을 찍던 인플레의 근본 원인이었다.
+            # 시그널 자체는 deque 에 남아 telemetry/대시보드로는 보인다.
+            if self._trusted(s):
+                continue
+            if s.name in CORRELATION_GATED_NAMES:
+                # 같은 PID 가 암호화 활동을 보일 때에만 weight 를 인정.
+                if self._pid_of(s) in enc_pids:
+                    total += s.weight
+                # 그 외(고립된 삭제)는 0 기여 — telemetry 로만 남는다.
+                continue
+            total += s.weight
+        return total
 
     @staticmethod
     def _level_for_score(score: int) -> Severity:

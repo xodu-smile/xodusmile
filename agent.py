@@ -15,6 +15,7 @@ from pathlib import Path
 
 from console import force_utf8
 from scoring import ScoringEngine, Signal, Severity
+from actor_trust import signal_actor_trusted
 from event_store import EventStore
 from detectors.canary import CanaryDetector
 from detectors.mass_io import MassIODetector
@@ -39,7 +40,9 @@ class Agent:
                  notify_user: bool = True,
                  enable_tamper_protection: bool = True,
                  watchdog_pid: int | None = None):
-        self.engine = ScoringEngine()
+        # Gate the score on *who* produced each signal: trusted system actors
+        # (Defender, servicing, WMI/perf rebuild, svchost) don't inflate it.
+        self.engine = ScoringEngine(is_trusted_actor=signal_actor_trusted)
         self.store = EventStore(db_path)
         self.engine.subscribe(self._on_signal)
 
