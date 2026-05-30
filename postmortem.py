@@ -136,11 +136,15 @@ def build_timeline(signals: list[dict]) -> dict:
     t0 = signals[0]["timestamp"]
     t_end = signals[-1]["timestamp"]
 
+    # "암호화 행위 첫 감지"는 공격 *종류*를 보여주는 정보용 마커일 뿐,
+    # 지연(latency) 측정 기준(anchor)으로 쓰면 안 된다. process_kernel·canary
+    # 같은 다른 탐지기가 암호화 신호보다 먼저 에스컬레이션하면(=선제 탐지)
+    # 기준이 뒤로 밀려 음수 지연이 나온다. anchor 는 항상 가장 이른 시그널(t0).
     first_enc = first_where(
         signals,
         lambda s: ENCRYPTION_HINT.search(f"{s['detector']} {s['name']} {s['message']}"),
     )
-    attack_start = first_enc["timestamp"] if first_enc else t0
+    anchor = t0
 
     first_high = first_where(
         signals, lambda s: SEV_ORDER.get(s["level_after"], 0) >= SEV_ORDER["HIGH"])
@@ -151,7 +155,8 @@ def build_timeline(signals: list[dict]) -> dict:
     return {
         "t0": t0,
         "t_end": t_end,
-        "attack_start": attack_start,
+        "anchor": anchor,
+        "attack_start": anchor,   # 하위호환 키(=anchor=첫 시그널)
         "first_enc": first_enc,
         "first_high": first_high,
         "first_crit": first_crit,
@@ -293,6 +298,26 @@ def fmt_delta(a: Optional[float], b: Optional[float]) -> str:
     return f"{d:+.1f}s"
 
 
+# GLE=0 은 Windows 에서 "성공"(GetLastError==0)을 뜻한다. 예전 responder 가
+# 성공 GLE 를 error 필드에 흘려넣은 적이 있어, 이를 오류로 세면 안 된다.
+_SUCCESS_GLE_RE = re.compile(r"GLE\s*=\s*0(?:x0+)?\b", re.IGNORECASE)
+
+
+def action_error(a: dict) -> Optional[str]:
+    """액션의 *진짜* 실패 사유(없으면 None).
+
+    - error 필드가 있어도 GLE=0(성공) 류면 오류 아님.
+    - steps 안의 명시적 '실패'/'fail' 도 오류로 인정.
+    """
+    e = (a.get("error") or "").strip()
+    if e and not _SUCCESS_GLE_RE.search(e):
+        return e
+    for s in (a.get("steps") or []):
+        if isinstance(s, str) and ("실패" in s or "fail" in s.lower()):
+            return s
+    return None
+
+
 def render(signals, tl, actions, damage, args) -> str:
     L: list[str] = []
     def line(s=""): L.append(s)
@@ -313,31 +338,36 @@ def render(signals, tl, actions, damage, args) -> str:
     line("## 1. 탐지 타임라인 / 지연")
     line("")
     if tl:
-        line("| 이벤트 | 시각 | 공격시작 기준 |")
+        anc = tl["anchor"]
+        line("| 이벤트 | 시각 | 첫 시그널 기준 |")
         line("|--------|------|----------------|")
-        line(f"| 첫 시그널 | {fmt_ts(tl['t0'])} | {fmt_delta(tl['t0'], tl['attack_start'])} |")
-        fe = tl["first_enc"]
-        line(f"| 암호화 행위 첫 감지 | {fmt_ts(tl['attack_start'])} | "
-             f"{'(기준)' if fe else 'n/a'} |")
+        line(f"| 첫 시그널 | {fmt_ts(tl['t0'])} | (기준) |")
         fh = tl["first_high"]
         line(f"| HIGH 도달 | {fmt_ts(fh['timestamp']) if fh else '—'} | "
-             f"{fmt_delta(fh['timestamp'] if fh else None, tl['attack_start'])} |")
+             f"{fmt_delta(fh['timestamp'] if fh else None, anc)} |")
         fc = tl["first_crit"]
         line(f"| CRITICAL 도달 | {fmt_ts(fc['timestamp']) if fc else '—'} | "
-             f"{fmt_delta(fc['timestamp'] if fc else None, tl['attack_start'])} |")
+             f"{fmt_delta(fc['timestamp'] if fc else None, anc)} |")
+        fe = tl["first_enc"]
+        line(f"| 암호화 행위 첫 감지 | {fmt_ts(fe['timestamp']) if fe else '—'} | "
+             f"{fmt_delta(fe['timestamp'] if fe else None, anc)} |")
         first_act_ts = actions[0]["timestamp"] if actions else None
         line(f"| 첫 대응(quarantine/kill) | {fmt_ts(first_act_ts)} | "
-             f"{fmt_delta(first_act_ts, tl['attack_start'])} |")
+             f"{fmt_delta(first_act_ts, anc)} |")
         line(f"| 최고 점수 | {fmt_ts(tl['peak_at'])} (score={tl['peak_score']}) | "
-             f"{fmt_delta(tl['peak_at'], tl['attack_start'])} |")
+             f"{fmt_delta(tl['peak_at'], anc)} |")
         line("")
-        # 핵심 지표
+        # 핵심 지표 (anchor=첫 시그널 → 항상 ≥ 0)
         if fh:
-            line(f"**탐지 지연 (공격시작→HIGH): "
-                 f"{fh['timestamp'] - tl['attack_start']:.1f}s**")
+            line(f"**에스컬레이션 지연 (첫 시그널→HIGH): "
+                 f"{fh['timestamp'] - anc:.1f}s**")
         if first_act_ts:
-            line(f"**대응 지연 (공격시작→첫 차단): "
-                 f"{first_act_ts - tl['attack_start']:.1f}s**")
+            line(f"**대응 지연 (첫 시그널→첫 차단): "
+                 f"{first_act_ts - anc:.1f}s**")
+        # 선제 탐지: 암호화 신호보다 먼저 HIGH 에 도달했는가?
+        if fh and fe and fh["timestamp"] < fe["timestamp"]:
+            line(f"**선제 탐지: 암호화 신호보다 {fe['timestamp'] - fh['timestamp']:.1f}s "
+                 f"먼저 HIGH 도달 (암호화 시작 전 차단 기회).**")
         line("")
     else:
         line("_타임라인 없음._")
@@ -366,7 +396,7 @@ def render(signals, tl, actions, damage, args) -> str:
     if actions:
         quar = [a for a in actions if a.get("quarantined")]
         kill = [a for a in actions if a.get("terminated")]
-        errs = [a for a in actions if a.get("error")]
+        errs = [a for a in actions if action_error(a)]
         pids = sorted({a.get("pid") for a in actions if a.get("pid")})
         line(f"- 대응 인시던트: **{len(actions)}**  "
              f"(고유 PID {len(pids)})")
@@ -382,7 +412,7 @@ def render(signals, tl, actions, damage, args) -> str:
                  f"| {'Y' if a.get('quarantined') else '·'} "
                  f"| {'Y' if a.get('terminated') else '·'} "
                  f"| {(a.get('reason') or '')[:40]} "
-                 f"| {(a.get('error') or '')[:40]} |")
+                 f"| {(action_error(a) or '')[:40]} |")
         line("")
     else:
         line("_대응 리포트가 없습니다 — 임계치 미달이었거나, 대응 전에 "
