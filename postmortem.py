@@ -27,10 +27,13 @@ import argparse
 import json
 import math
 import re
+import shutil
 import sqlite3
 import sys
+import tempfile
 import time
 from collections import Counter
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional
 
@@ -67,26 +70,72 @@ SESSION_GAP_SECONDS = 300
 # detector.db 읽기
 # ---------------------------------------------------------------------------
 
+@contextmanager
+def _db_snapshot(db_path: Path):
+    """DB(+저널/WAL)를 임시 복사본으로 떠서 그 경로를 돌려준다.
+
+    라이브 에이전트가 DB 를 잡고 있거나(hot-journal) 검체가 디스크를 휘젓는
+    중에도 원본을 건드리지 않고 안전하게 읽기 위함. 복사본을 *일반 모드*로
+    열어야 SQLite 가 핫 저널을 롤백/복구할 수 있다 — 원본을 ``mode=ro`` 로
+    직접 열면 핫 저널이 있을 때 'readonly database' 로 실패한다.
+    """
+    tmpdir = tempfile.mkdtemp(prefix="pm_db_")
+    try:
+        dst = Path(tmpdir) / "snapshot.db"
+        shutil.copy2(db_path, dst)
+        # WAL/롤백 저널 사이드카도 함께 복사해 복사본이 일관 상태가 되게 한다.
+        for suffix in ("-journal", "-wal", "-shm"):
+            side = Path(str(db_path) + suffix)
+            if side.exists():
+                shutil.copy2(side, Path(str(dst) + suffix))
+        yield dst
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def _query_signals(conn: sqlite3.Connection, since: Optional[float]):
+    conn.row_factory = sqlite3.Row
+    if since is not None:
+        return conn.execute(
+            "SELECT * FROM signals WHERE timestamp >= ? ORDER BY timestamp ASC",
+            (since,),
+        ).fetchall()
+    return conn.execute(
+        "SELECT * FROM signals ORDER BY timestamp ASC"
+    ).fetchall()
+
+
 def load_signals(db_path: Path, since: Optional[float]) -> list[dict]:
-    """signals 테이블을 시간순으로 읽는다. since 가 주어지면 그 이후만."""
+    """signals 테이블을 시간순으로 읽는다. since 가 주어지면 그 이후만.
+
+    원본을 직접 열지 않고 임시 복사본(저널/WAL 포함)에서 읽어, 라이브
+    에이전트의 핫 저널이나 진행 중인 암호화에도 집계가 깨지지 않게 한다.
+    복사/복구가 실패하면 원본을 읽기전용으로 best-effort 재시도한다.
+    """
     if not db_path.exists():
         return []
-    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5.0)
-    conn.row_factory = sqlite3.Row
+    rows = None
     try:
-        if since is not None:
-            rows = conn.execute(
-                "SELECT * FROM signals WHERE timestamp >= ? ORDER BY timestamp ASC",
-                (since,),
-            ).fetchall()
-        else:
-            rows = conn.execute(
-                "SELECT * FROM signals ORDER BY timestamp ASC"
-            ).fetchall()
-    finally:
-        conn.close()
+        with _db_snapshot(db_path) as snap:
+            conn = sqlite3.connect(str(snap), timeout=5.0)
+            try:
+                rows = _query_signals(conn, since)
+            finally:
+                conn.close()
+    except Exception as e:
+        print(f"[postmortem] 스냅샷 읽기 실패({e}); 원본 RO 로 재시도",
+              file=sys.stderr)
+        try:
+            conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5.0)
+            try:
+                rows = _query_signals(conn, since)
+            finally:
+                conn.close()
+        except Exception as e2:
+            print(f"[postmortem] DB 읽기 실패: {e2}", file=sys.stderr)
+            return []
     out = []
-    for r in rows:
+    for r in rows or []:
         d = dict(r)
         try:
             d["metadata"] = json.loads(d["metadata"]) if d.get("metadata") else {}
