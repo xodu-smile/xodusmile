@@ -235,7 +235,8 @@ Get-MpComputerStatus | Select-Object RealTimeProtectionEnabled, IsTamperProtecte
 #        대부분 AES 암호화라 탐색기가 복호화하지 못하고 → 비번창도 안 뜨고
 #        "빈 폴더"가 됩니다(확장자가 .zip 이어도 동일). 7-Zip 으로 푸세요:
 #        winget install -e --id 7zip.7zip   # 미설치 시
-& 'C:\Program Files\7-Zip\7z.exe' x 'C:\sample.zip' -o'C:\sample' -p<비밀번호>
+# 형식: & 'C:\Program Files\7-Zip\7z.exe' x '<받은_zip_경로>' -o'<압축_풀_폴더>' -p<비밀번호>
+& 'C:\Program Files\7-Zip\7z.exe' x '<받은_zip_경로>' -o'<압축_풀_폴더>' -p<비밀번호>
 #   -o / -p 와 값 사이에 공백 없음. "CRC failed"/"Data error" 가 나오면 압축
 #   파일이 다운로드 중 잘린 것 → 재다운로드.
 ```

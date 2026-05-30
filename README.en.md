@@ -230,7 +230,8 @@ Get-MpComputerStatus | Select-Object RealTimeProtectionEnabled, IsTamperProtecte
 #        gives no password prompt and leaves an "empty folder" (even for a .zip).
 #        Use 7-Zip:
 #        winget install -e --id 7zip.7zip   # if not installed
-& 'C:\Program Files\7-Zip\7z.exe' x 'C:\sample.zip' -o'C:\sample' -p<password>
+# format: & 'C:\Program Files\7-Zip\7z.exe' x '<path to the .zip>' -o'<folder to extract into>' -p<password>
+& 'C:\Program Files\7-Zip\7z.exe' x '<path to the .zip>' -o'<folder to extract into>' -p<password>
 #   No space after -o / -p. A "CRC failed"/"Data error" means the archive was
 #   truncated during download → re-download.
 ```
