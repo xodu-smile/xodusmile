@@ -19,11 +19,18 @@
 param(
     [ValidateSet('Debug','Release')]
     [string] $Configuration = 'Release',
-    [string] $Platform = 'x64'
+    [ValidateSet('x64','ARM64')]
+    [string] $Platform
 )
 
 . "$PSScriptRoot\_common.ps1"
 Require-Admin
+
+# Default to the host architecture so the path matches what
+# build_driver.ps1 produced (e.g. build\ARM64\Release on an ARM64 host).
+if (-not $Platform) {
+    $Platform = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'ARM64' } else { 'x64' }
+}
 
 $repoRoot = Get-RepoRoot
 $buildDir = Join-Path $repoRoot "minifilter\build\$Platform\$Configuration"

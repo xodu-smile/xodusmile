@@ -14,6 +14,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from console import force_utf8
 from agent import Agent
 from tests.simulator import (
     populate_targets,
@@ -31,6 +32,7 @@ def section(title):
 
 
 def main():
+    force_utf8()
     watch = Path("./test_watch_dir").resolve()
     watch.mkdir(parents=True, exist_ok=True)
 

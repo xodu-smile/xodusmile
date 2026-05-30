@@ -13,14 +13,6 @@ Windows 11용 **랜섬웨어 전용 소형 EDR** 입니다.
 
 ---
 
-## 한 줄 요약
-
-> "**랜섬웨어가 본격적으로 파일을 잠그기 직전의 사전 행동들** 을
-> 커널·사용자 모드 양쪽에서 감지해서, 점수가 임계치를 넘으면
-> **그 프로세스를 자동으로 차단/종료** 하는 방어 도구."
-
----
-
 ## 주요 기능 (Features)
 
 | 분류 | 설명 |
@@ -35,54 +27,10 @@ Windows 11용 **랜섬웨어 전용 소형 EDR** 입니다.
 
 ---
 
-## 동작 구조 (Architecture)
-
-> 큰 그림: **커널이 모든 파일 작업을 가로채서** → 사용자 모드로 보내고 → 탐지기들이 점수 매기고 → 임계 넘으면 자동 대응.
-
-```
-                       +-----------------------------+
-                       |     RansomGuard.sys         |  (커널 미니필터)
-                       |  IRP 파일 작업 · Ps 콜백    |
-                       |  Cm 콜백      · Ob 콜백     |
-                       +--------------+--------------+
-                                      | 필터 포트 (\RansomGuardPort)
-                                      v
-   +-----------------+      +---------------------+      +-------------------+
-   |  사용자 모드    |      |  minifilter_bridge  |      |    responder      |
-   |  탐지기:        |      |  (ctypes -> fltlib) |<---> |  - 격리           |
-   |   canary        |----->+----------+----------+      |  - 종료           |
-   |   mass_io       |                 |                 +---------+---------+
-   |   process_*     |                 v                           |
-   +--------+--------+      +---------------------+                |
-            |               |  process_kernel     |                |
-            |               |  registry_kernel    |                |
-            |               +----------+----------+                |
-            |                          |                           |
-            +-----------+------------- v --------------------------+
-                        v       +---------------------+
-                 +------+-----+ |   ScoringEngine     |<--+
-                 |   tamper   | |   (120초 윈도우)    |   |
-                 +------------+ +----------+----------+   |
-                                           |              |
-                                           v              |
-                                +---------------------+   |
-                                |  EventStore (SQLite)|   |
-                                +----------+----------+   |
-                                           |              |
-                              +------------+------------+ |
-                              v                         v |
-                +---------------------+    +---------------------+
-                |   Flask 대시보드    |    |   incident_report   |
-                +---------------------+    |  (마크다운 + 알림)  |
-                            ^              +---------------------+
-                            |
-                            +--- watchdog_service (헬스체크 / 재시작)
-```
-
-### 핵심 아이디어: 점수 누적 방식
+## 점수 / 등급 (Scoring)
 
 신호 하나로 결론 내지 않아요. **120초 슬라이딩 윈도우** 안의 모든 신호 점수를
-합산해서 등급을 판정합니다.
+합산해서 등급을 판정합니다. (postmortem·대시보드 결과를 읽을 때 이 표를 참고)
 
 | 점수 | 등급 | 의미 |
 |---|---|---|
@@ -96,34 +44,10 @@ Windows 11용 **랜섬웨어 전용 소형 EDR** 입니다.
 
 ---
 
-## 파일 구성 (Components)
-
-| 파일 | 역할 |
-|---|---|
-| `minifilter/RansomGuard.c` | 커널 미니필터 드라이버 (C, 1,274 줄) |
-| `minifilter/RansomGuard.h` | 커널↔사용자 공유 이벤트/명령 레이아웃 |
-| `detectors/minifilter_bridge.py` | 사용자 모드 다리 (`ctypes` → `fltlib.dll`) |
-| `detectors/canary.py` | 카나리 파일 SHA-256 트립와이어 |
-| `detectors/mass_io.py` | watchdog 기반 대량 I/O + 엔트로피 + 매직바이트 |
-| `detectors/process_cmdline.py` | WMI 기반 프로세스 생성 룰 (VSS/BCD/Defender 등) |
-| `detectors/process_watcher.py` | psutil 폴링, LOLBin 체인, fan-out |
-| `detectors/process_kernel.py` | 커널 콜백 기반 프로세스 생성 탐지 (WMI 미사용) |
-| `detectors/registry_kernel.py` | 커널 콜백 기반 레지스트리 쓰기 탐지 |
-| `scoring.py` | 가중치 + 시간 윈도우 신호 합산 |
-| `responder.py` | 의심 PID 격리 + 종료 |
-| `incident_report.py` | 마크다운 사건 보고서 + 데스크톱 알림 |
-| `tamper.py` | Critical-process 플래그 + DACL 강화 |
-| `event_store.py` | SQLite 영속화 |
-| `dashboard/app.py` | Flask UI + `/api/*` |
-| `service.py` | Windows 서비스 호스트 (`RansomGuardAgent`) |
-| `watchdog_service.py` | Agent 가 hang 되면 재시작하는 사이드카 서비스 |
-
----
-
 ## 실행 환경 (Requirements)
 
-- **OS:** Windows 11 (22H2 이상), x64
-- **사용자 모드:** Python 3.10+ x64
+- **OS:** Windows 11 (22H2 이상), x64 또는 ARM64
+- **사용자 모드:** Python 3.10+ (x64 / ARM64)
 - **커널 빌드:** Visual Studio 2022 Build Tools (C++ 워크로드) + Windows Driver Kit (WDK 10.0.26100 이상)
 - **드라이버 로드:** 테스트 서명 활성화 또는 `RansomGuard.sys` 정식 서명 카탈로그
 
@@ -156,8 +80,10 @@ Windows 11용 **랜섬웨어 전용 소형 EDR** 입니다.
 5. (옵션) 드라이버 빌드 및 설치
 
 드라이버 빌드 스크립트(`scripts/build_driver.ps1`)는 `vswhere` 로 찾은 `msbuild`
-를 호출해서 `minifilter\build\x64\Release\RansomGuard.sys` 와 `.inf`, `.cat` 을
-생성합니다.
+를 호출하고, 빌드 전에 NuGet 패키지(WDK/SDK)를 자동 복원합니다. **호스트
+아키텍처를 자동 감지**해서 x64 호스트는 x64 로, ARM64 호스트는 ARM64 로 빌드하며,
+산출물은 `minifilter\build\<arch>\Release\RansomGuard.sys` 와 `.inf`, `.cat` 입니다
+(`-Platform x64|ARM64` 로 직접 지정도 가능).
 
 WDK 나 VS Build Tools 가 없으면 스크립트가 **무인 설치하지 않고** 정확한
 `winget` 명령을 출력해줘요 (수 GB 다운로드를 갑자기 시작하지 않으려고).
@@ -216,21 +142,6 @@ python agent.py --no-tamper-protection
 | `--no-tamper-protection` | `RtlSetProcessIsCritical` + DACL 강화 끄기 (개발 시 taskkill 가능하게) |
 | `--watchdog-pid <PID>` | 동반 watchdog 의 PID. Agent 와 함께 커널 변조 방지 등록 |
 
-### 대시보드 API
-
-| 메서드 | 경로 | 용도 |
-|---|---|---|
-| `GET` | `/api/status` | 현재 점수, 등급, 최근 신호, responder 상태 |
-| `GET` | `/api/heartbeat` | `watchdog_service` 가 사용하는 헬스체크 (200 OK) |
-| `GET` | `/api/events` | 최근 100개 영속화된 신호 |
-| `GET` | `/api/processes` | watcher 의 실시간 프로세스 스냅샷 |
-| `GET` | `/api/actions` | Responder 행동 로그 |
-| `GET` | `/api/reports` | `--reports-dir` 아래 사건 보고서 목록 |
-| `GET` | `/api/reports/<filename>` | 개별 사건 보고서 조회 |
-| `POST` | `/api/kill` | 수동 종료 — `{ "pid": 1234, "reason": "..." }` |
-| `POST` | `/api/release` | 격리된 PID 해제 — `{ "pid": 1234 }` |
-| `POST` | `/api/reset` | 채점 윈도우 초기화 |
-
 ---
 
 ## 테스트 / 검증 (Validation)
@@ -250,6 +161,53 @@ python tests\simulator.py --scenario {populate|encrypt|canary|vss|bcd|full|steal
 
 두 도구 모두 **진짜 `vssadmin` 이나 `bcdedit` 을 실행하지 않습니다.**
 cmdline 룰은 `ProcessCmdlineDetector.submit_external` 을 통해 가짜 이벤트로만 검증됩니다.
+
+---
+
+## 격리 랩에서의 실검체 테스트 (Real-sample lab testing)
+
+> ⚠ **위 시뮬레이터로 탐지 로직의 대부분이 검증됩니다.** 실제 랜섬웨어 검체는
+> 권한상승·전파·안티VM 같은 부가 행위를 볼 때만 필요하고, **네트워크가 격리되고
+> 스냅샷이 있는 전용 VM 에서만** 실행하세요. 실제 검체는 watch dir 밖 시스템
+> 전체를 암호화해 VM 을 부팅 불능으로 만들 수 있습니다.
+
+검체를 터뜨리기 전후로 두 보조 도구를 씁니다.
+
+**detonate 전 — 준비 점검 (`scripts/lab_preflight.ps1`)**
+
+격리 상태를 점검하고 GO / NO-GO 를 출력합니다. BLOCKER(물리 머신, 진짜 인터넷
+도달, 스냅샷 미확인)가 하나라도 있으면 `exit 1` 로 막습니다.
+
+```powershell
+# 관리자 PowerShell, 격리 VM 안에서
+.\scripts\lab_preflight.ps1 -WatchDir C:\Users\you\Documents -Count 500
+```
+
+점검 항목: VM 여부 · 네트워크 격리 · 호스트 공유 채널 · testsigning · 드라이버/
+에이전트 로드 · 디코이 더미 파일 생성 · 스냅샷 확인(직접 타이핑).
+
+**detonate 후 — 성적 집계 (`postmortem.py`)**
+
+에이전트가 죽거나 BSOD 가 나도 동작하도록, 디스크에 영속된 데이터(`detector.db`,
+`reports/`, watch dir)만 읽어 결과를 집계합니다.
+
+```powershell
+# 스냅샷 복원 전에 실행
+python postmortem.py --watch C:\Users\you\Documents --out postmortem.md
+```
+
+출력: 탐지/대응 지연 타임라인 · 탐지기·심각도 분포 · quarantine/kill 집계 ·
+디코이 손상 비율(= 탐지 전 피해량) · 첫 대응 이후 추가 손상 · 랜섬노트 후보.
+
+**전체 흐름**
+
+```powershell
+python agent.py --watch C:\Users\you\Documents                 # 1) 에이전트 (변조 방지 ON)
+.\scripts\lab_preflight.ps1 -WatchDir C:\Users\you\Documents   # 2) GO 확인 → VM 스냅샷
+#                                                              # 3) 검체 detonate (격리 VM)
+python postmortem.py --watch C:\Users\you\Documents --out postmortem.md  # 4) 집계
+#                                                              # 5) 스냅샷 복원
+```
 
 ---
 

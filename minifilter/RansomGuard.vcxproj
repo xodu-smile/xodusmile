@@ -1,7 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
-  <Import Project="packages\Microsoft.Windows.WDK.x64.10.0.26100.6584\build\native\Microsoft.Windows.WDK.x64.props" Condition="Exists('packages\Microsoft.Windows.WDK.x64.10.0.26100.6584\build\native\Microsoft.Windows.WDK.x64.props')" />
-  <Import Project="packages\Microsoft.Windows.SDK.CPP.x64.10.0.26100.1\build\native\Microsoft.Windows.SDK.cpp.x64.props" Condition="Exists('packages\Microsoft.Windows.SDK.CPP.x64.10.0.26100.1\build\native\Microsoft.Windows.SDK.cpp.x64.props')" />
+  <Import Project="packages\Microsoft.Windows.WDK.x64.10.0.26100.6584\build\native\Microsoft.Windows.WDK.x64.props" Condition="'$(Platform)'=='x64' And Exists('packages\Microsoft.Windows.WDK.x64.10.0.26100.6584\build\native\Microsoft.Windows.WDK.x64.props')" />
+  <Import Project="packages\Microsoft.Windows.SDK.CPP.x64.10.0.26100.1\build\native\Microsoft.Windows.SDK.cpp.x64.props" Condition="'$(Platform)'=='x64' And Exists('packages\Microsoft.Windows.SDK.CPP.x64.10.0.26100.1\build\native\Microsoft.Windows.SDK.cpp.x64.props')" />
+  <Import Project="packages\Microsoft.Windows.WDK.arm64.10.0.26100.6584\build\native\Microsoft.Windows.WDK.arm64.props" Condition="'$(Platform)'=='ARM64' And Exists('packages\Microsoft.Windows.WDK.arm64.10.0.26100.6584\build\native\Microsoft.Windows.WDK.arm64.props')" />
+  <Import Project="packages\Microsoft.Windows.SDK.CPP.arm64.10.0.26100.1\build\native\Microsoft.Windows.SDK.cpp.arm64.props" Condition="'$(Platform)'=='ARM64' And Exists('packages\Microsoft.Windows.SDK.CPP.arm64.10.0.26100.1\build\native\Microsoft.Windows.SDK.cpp.arm64.props')" />
   <Import Project="packages\Microsoft.Windows.SDK.CPP.10.0.26100.1\build\native\Microsoft.Windows.SDK.cpp.props" Condition="Exists('packages\Microsoft.Windows.SDK.CPP.10.0.26100.1\build\native\Microsoft.Windows.SDK.cpp.props')" />
   <ItemGroup Label="ProjectConfigurations">
     <ProjectConfiguration Include="Debug|x64">
@@ -11,6 +13,14 @@
     <ProjectConfiguration Include="Release|x64">
       <Configuration>Release</Configuration>
       <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Debug|ARM64">
+      <Configuration>Debug</Configuration>
+      <Platform>ARM64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|ARM64">
+      <Configuration>Release</Configuration>
+      <Platform>ARM64</Platform>
     </ProjectConfiguration>
   </ItemGroup>
   <PropertyGroup Label="Globals">
@@ -23,16 +33,16 @@
     <RootNamespace>RansomGuard</RootNamespace>
     <WindowsTargetPlatformVersion>10.0.26100.0</WindowsTargetPlatformVersion>
   </PropertyGroup>
-  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
   <PropertyGroup Label="Configuration">
     <TargetVersion>Windows10</TargetVersion>
     <UseDebugLibraries Condition="'$(Configuration)'=='Debug'">true</UseDebugLibraries>
     <UseDebugLibraries Condition="'$(Configuration)'=='Release'">false</UseDebugLibraries>
     <PlatformToolset>WindowsKernelModeDriver10.0</PlatformToolset>
-    <ConfigurationType>Driver</ConfigurationType>
+    <ConfigurationType>DynamicLibrary</ConfigurationType>
     <DriverType>WDM</DriverType>
     <DriverTargetPlatform>Universal</DriverTargetPlatform>
   </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
   <ImportGroup Label="ExtensionSettings" />
   <ImportGroup Label="PropertySheets">
@@ -44,29 +54,55 @@
     <TargetName>RansomGuard</TargetName>
     <TargetExt>.sys</TargetExt>
   </PropertyGroup>
+  <!-- Kernel mode drivers must not embed a Win32 manifest -->
+  <PropertyGroup>
+    <GenerateManifest>false</GenerateManifest>
+    <EmbedManifest>false</EmbedManifest>
+  </PropertyGroup>
+
+  <!-- WDKContentRoot has no trailing slash; compute correct paths with EnsureTrailingSlash -->
+  <PropertyGroup Condition="'$(WDKContentRoot)' != ''">
+    <_WDKRoot>$([MSBuild]::EnsureTrailingSlash('$(WDKContentRoot)'))</_WDKRoot>
+    <_WDKKmInc>$(_WDKRoot)Include\$(WindowsTargetPlatformVersion)\km</_WDKKmInc>
+    <_WDKSharedInc>$(_WDKRoot)Include\$(WindowsTargetPlatformVersion)\shared</_WDKSharedInc>
+    <_WDKKmLib>$(_WDKRoot)Lib\$(WindowsTargetPlatformVersion)\km\$(Platform.ToLower())\</_WDKKmLib>
+  </PropertyGroup>
+
   <ItemDefinitionGroup>
     <ClCompile>
       <WarningLevel>Level4</WarningLevel>
       <TreatWarningAsError>true</TreatWarningAsError>
-      <PreprocessorDefinitions>
-        POOL_NX_OPTIN=1;
-        _WIN64;_AMD64_;AMD64;
-        %(PreprocessorDefinitions)
-      </PreprocessorDefinitions>
+      <PreprocessorDefinitions Condition="'$(Platform)'=='x64'">POOL_NX_OPTIN=1;_WIN64;_AMD64_;AMD64;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions Condition="'$(Platform)'=='ARM64'">POOL_NX_OPTIN=1;_WIN64;_ARM64_;ARM64;_KERNEL_MODE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <!-- Kernel mode: only WDK km + shared + MSVC intrinsics; block all user-mode IncludePath -->
+      <IgnoreStandardIncludePath>true</IgnoreStandardIncludePath>
+      <!-- /utf-8: source is UTF-8; /wd4324: suppress padding warnings in WDK ARM64 headers -->
+      <AdditionalOptions>/utf-8 /wd4324 %(AdditionalOptions)</AdditionalOptions>
+      <AdditionalIncludeDirectories>$(_WDKKmInc);$(_WDKKmInc)\crt;$(_WDKSharedInc);$(WindowsSdkDir)Include\$(WindowsTargetPlatformVersion)\shared;$(WindowsSdkDir)Include\$(WindowsTargetPlatformVersion)\um;$(VCToolsInstallDir)include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
-      <AdditionalDependencies>
-        $(DDK_LIB_PATH)\fltmgr.lib;
-        $(DDK_LIB_PATH)\ntoskrnl.lib;
-        %(AdditionalDependencies)
-      </AdditionalDependencies>
+      <AdditionalDependencies>$(_WDKKmLib)fltmgr.lib;$(_WDKKmLib)ntoskrnl.lib;$(_WDKKmLib)hal.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalOptions>/DRIVER:WDM %(AdditionalOptions)</AdditionalOptions>
+      <GenerateManifest>false</GenerateManifest>
+      <SubSystem>Native</SubSystem>
+      <Driver>Driver</Driver>
+      <EntryPointSymbol>DriverEntry</EntryPointSymbol>
+      <IgnoreAllDefaultLibraries>true</IgnoreAllDefaultLibraries>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
     </Link>
+    <Lib />
+    <Manifest>
+      <EmbedManifest>false</EmbedManifest>
+      <GenerateManifest>false</GenerateManifest>
+    </Manifest>
+    <PostBuildEvent />
     <DriverSign>
       <FileDigestAlgorithm>sha256</FileDigestAlgorithm>
     </DriverSign>
     <Inf>
       <SpecifyArchitecture>true</SpecifyArchitecture>
-      <Architecture>amd64</Architecture>
+      <Architecture Condition="'$(Platform)'=='x64'">amd64</Architecture>
+      <Architecture Condition="'$(Platform)'=='ARM64'">arm64</Architecture>
     </Inf>
   </ItemDefinitionGroup>
   <ItemGroup>
@@ -91,7 +127,9 @@
     </PropertyGroup>
     <Error Condition="!Exists('packages\Microsoft.Windows.SDK.CPP.10.0.26100.1\build\native\Microsoft.Windows.SDK.cpp.props')" Text="$([System.String]::Format('$(ErrorText)', 'packages\Microsoft.Windows.SDK.CPP.10.0.26100.1\build\native\Microsoft.Windows.SDK.cpp.props'))" />
     <Error Condition="!Exists('packages\Microsoft.Windows.SDK.CPP.10.0.26100.1\build\native\Microsoft.Windows.SDK.cpp.targets')" Text="$([System.String]::Format('$(ErrorText)', 'packages\Microsoft.Windows.SDK.CPP.10.0.26100.1\build\native\Microsoft.Windows.SDK.cpp.targets'))" />
-    <Error Condition="!Exists('packages\Microsoft.Windows.SDK.CPP.x64.10.0.26100.1\build\native\Microsoft.Windows.SDK.cpp.x64.props')" Text="$([System.String]::Format('$(ErrorText)', 'packages\Microsoft.Windows.SDK.CPP.x64.10.0.26100.1\build\native\Microsoft.Windows.SDK.cpp.x64.props'))" />
-    <Error Condition="!Exists('packages\Microsoft.Windows.WDK.x64.10.0.26100.6584\build\native\Microsoft.Windows.WDK.x64.props')" Text="$([System.String]::Format('$(ErrorText)', 'packages\Microsoft.Windows.WDK.x64.10.0.26100.6584\build\native\Microsoft.Windows.WDK.x64.props'))" />
+    <Error Condition="'$(Platform)'=='x64' And !Exists('packages\Microsoft.Windows.SDK.CPP.x64.10.0.26100.1\build\native\Microsoft.Windows.SDK.cpp.x64.props')" Text="$([System.String]::Format('$(ErrorText)', 'packages\Microsoft.Windows.SDK.CPP.x64.10.0.26100.1\build\native\Microsoft.Windows.SDK.cpp.x64.props'))" />
+    <Error Condition="'$(Platform)'=='x64' And !Exists('packages\Microsoft.Windows.WDK.x64.10.0.26100.6584\build\native\Microsoft.Windows.WDK.x64.props')" Text="$([System.String]::Format('$(ErrorText)', 'packages\Microsoft.Windows.WDK.x64.10.0.26100.6584\build\native\Microsoft.Windows.WDK.x64.props'))" />
+    <Error Condition="'$(Platform)'=='ARM64' And !Exists('packages\Microsoft.Windows.SDK.CPP.arm64.10.0.26100.1\build\native\Microsoft.Windows.SDK.cpp.arm64.props')" Text="$([System.String]::Format('$(ErrorText)', 'packages\Microsoft.Windows.SDK.CPP.arm64.10.0.26100.1\build\native\Microsoft.Windows.SDK.cpp.arm64.props'))" />
+    <Error Condition="'$(Platform)'=='ARM64' And !Exists('packages\Microsoft.Windows.WDK.arm64.10.0.26100.6584\build\native\Microsoft.Windows.WDK.arm64.props')" Text="$([System.String]::Format('$(ErrorText)', 'packages\Microsoft.Windows.WDK.arm64.10.0.26100.6584\build\native\Microsoft.Windows.WDK.arm64.props'))" />
   </Target>
 </Project>

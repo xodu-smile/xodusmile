@@ -37,72 +37,27 @@ process the moment it crosses a threshold.
 - **Flask dashboard** at `http://127.0.0.1:5000` — live score, recent
   events, process table, responder log, manual kill/release.
 
-## Architecture
+## Scoring
 
-```
-                       +-----------------------------+
-                       |     RansomGuard.sys         |  (kernel minifilter)
-                       |  IRP file ops · Ps callback |
-                       |  Cm callback  · Ob callback |
-                       +--------------+--------------+
-                                      | filter port (\RansomGuardPort)
-                                      v
-   +-----------------+      +---------------------+      +-------------------+
-   |  user-mode      |      |  minifilter_bridge  |      |    responder      |
-   |  detectors:     |      |  (ctypes -> fltlib) |<---> |  - quarantine     |
-   |   canary        |----->+----------+----------+      |  - terminate      |
-   |   mass_io       |                 |                 +---------+---------+
-   |   process_*     |                 v                           |
-   +--------+--------+      +---------------------+                |
-            |               |  process_kernel     |                |
-            |               |  registry_kernel    |                |
-            |               +----------+----------+                |
-            |                          |                           |
-            +-----------+------------- v --------------------------+
-                        v       +---------------------+
-                 +------+-----+ |   ScoringEngine     |<--+
-                 |   tamper   | |   (rolling 120s)    |   |
-                 +------------+ +----------+----------+   |
-                                           |              |
-                                           v              |
-                                +---------------------+   |
-                                |  EventStore (SQLite)|   |
-                                +----------+----------+   |
-                                           |              |
-                              +------------+------------+ |
-                              v                         v |
-                +---------------------+    +---------------------+
-                |   Flask dashboard   |    |   incident_report   |
-                +---------------------+    |  (markdown + notif) |
-                            ^              +---------------------+
-                            |
-                            +--- watchdog_service (heartbeat / restart)
-```
+No single signal decides anything. Scores from every signal inside a
+**rolling 120-second window** are summed to pick a level. (Use this table
+when reading postmortem / dashboard output.)
 
-| Component                        | Role                                            |
-|----------------------------------|-------------------------------------------------|
-| `minifilter/RansomGuard.c`       | Kernel minifilter driver                        |
-| `minifilter/RansomGuard.h`       | Shared event/command layout                     |
-| `detectors/minifilter_bridge.py` | User-mode connector (`ctypes` → `fltlib.dll`)   |
-| `detectors/canary.py`            | Canary file SHA-256 trip wires                  |
-| `detectors/mass_io.py`           | Watchdog-based bulk I/O + entropy + magic-byte  |
-| `detectors/process_cmdline.py`   | WMI process-create rules (VSS/BCD/Defender/…)   |
-| `detectors/process_watcher.py`   | psutil polling, LOLBin chains, fan-out          |
-| `detectors/process_kernel.py`    | Kernel-callback process-create detector (no WMI)|
-| `detectors/registry_kernel.py`   | Kernel-callback registry-write detector         |
-| `scoring.py`                     | Weighted, time-windowed signal aggregation      |
-| `responder.py`                   | Quarantine + terminate suspicious PIDs          |
-| `incident_report.py`             | Markdown incident reports + desktop notification|
-| `tamper.py`                      | Critical-process flag + DACL hardening          |
-| `event_store.py`                 | SQLite persistence                              |
-| `dashboard/app.py`               | Flask UI + `/api/*`                             |
-| `service.py`                     | Windows service host (`RansomGuardAgent`)       |
-| `watchdog_service.py`            | Sidecar service that restarts the agent on hang |
+| Score   | Level    | Meaning           |
+|---------|----------|-------------------|
+| 0–29    | INFO     | normal            |
+| 30–59   | LOW      | mildly suspicious |
+| 60–99   | MEDIUM   | watch             |
+| 100–149 | HIGH     | dangerous         |
+| 150+    | CRITICAL | respond now       |
+
+Old signals age out after two minutes, so a past event won't keep the
+alarm ringing.
 
 ## Requirements
 
-- **OS:** Windows 11 (22H2 or newer), x64.
-- **User-mode:** Python 3.10+ x64.
+- **OS:** Windows 11 (22H2 or newer), x64 or ARM64.
+- **User-mode:** Python 3.10+ (x64 or ARM64).
 - **Kernel-mode build:** Visual Studio 2022 Build Tools with the C++
   workload + Windows Driver Kit (WDK 10.0.26100 or compatible).
 - **Driver load:** test signing enabled, *or* an attestation-signed
@@ -135,8 +90,10 @@ From an elevated PowerShell at the repo root:
 5. optionally build and install the driver.
 
 The driver build script (`scripts/build_driver.ps1`) calls `msbuild`
-located via `vswhere` and produces `minifilter\build\x64\Release\
-RansomGuard.sys` plus `.inf` and `.cat`.
+located via `vswhere`, restores the WDK/SDK NuGet packages first, and
+**auto-detects the host architecture** — building x64 on an x64 host and
+ARM64 on an ARM64 host. Output lands at `minifilter\build\<arch>\Release\
+RansomGuard.sys` plus `.inf` and `.cat` (override with `-Platform x64|ARM64`).
 
 If the WDK or VS Build Tools are missing, the script prints the exact
 `winget` lines to install them rather than attempting an unattended
@@ -195,19 +152,6 @@ CLI flags:
 | `--no-tamper-protection`        | Disable `RtlSetProcessIsCritical` + DACL hardening (useful in dev so you can taskkill).|
 | `--watchdog-pid <PID>`          | PID of the companion watchdog; will be kernel-tamper-protected alongside the agent.    |
 
-The dashboard exposes:
-
-- `GET  /api/status`             — current score, level, recent signals, responder state
-- `GET  /api/heartbeat`          — liveness probe used by `watchdog_service` (200 OK)
-- `GET  /api/events`             — last 100 persisted signals
-- `GET  /api/processes`          — live process snapshot from the watcher
-- `GET  /api/actions`            — responder action log
-- `GET  /api/reports`            — list markdown incident reports under `--reports-dir`
-- `GET  /api/reports/<filename>` — fetch a single incident report by filename
-- `POST /api/kill`               — `{ "pid": 1234, "reason": "..." }` manual kill
-- `POST /api/release`            — `{ "pid": 1234 }` release a quarantined PID
-- `POST /api/reset`              — reset the scoring window
-
 ## Validation
 
 ```powershell
@@ -224,6 +168,54 @@ python tests\simulator.py --scenario {populate|encrypt|canary|vss|bcd|full|steal
 
 Neither runs real `vssadmin` / `bcdedit` commands; cmdline rules are
 exercised through `ProcessCmdlineDetector.submit_external`.
+
+## Lab testing with real samples
+
+> ⚠ **The simulators above exercise most of the detection logic.** Real
+> ransomware samples are only needed to observe extra behaviours (privilege
+> escalation, propagation, anti-VM), and must be detonated **only in a
+> dedicated VM with the network isolated and a snapshot taken**. A real
+> sample encrypts the whole system beyond the watch dir and can leave the
+> VM unbootable.
+
+Two helpers bracket the detonation.
+
+**Before — readiness check (`scripts/lab_preflight.ps1`)**
+
+Verifies isolation and prints GO / NO-GO. Any BLOCKER (physical machine,
+real internet reachable, snapshot unconfirmed) exits `1`.
+
+```powershell
+# Elevated PowerShell, inside the isolated VM
+.\scripts\lab_preflight.ps1 -WatchDir C:\Users\you\Documents -Count 500
+```
+
+Checks: VM detection · network isolation · host share channels · testsigning
+· driver/agent loaded · decoy file population · snapshot confirmation.
+
+**After — scorecard (`postmortem.py`)**
+
+Reads only disk-persisted evidence (`detector.db`, `reports/`, the watch
+dir) so it still works if the agent was killed or the VM bugchecked.
+
+```powershell
+# Run before reverting the snapshot
+python postmortem.py --watch C:\Users\you\Documents --out postmortem.md
+```
+
+Reports: detection/response latency timeline · detector & severity
+breakdown · quarantine/kill tally · decoy damage ratio (= pre-detection
+loss) · files damaged after first response · ransom-note candidates.
+
+**Full flow**
+
+```powershell
+python agent.py --watch C:\Users\you\Documents                 # 1) agent (tamper ON)
+.\scripts\lab_preflight.ps1 -WatchDir C:\Users\you\Documents   # 2) confirm GO -> snapshot
+#                                                              # 3) detonate the sample (isolated VM)
+python postmortem.py --watch C:\Users\you\Documents --out postmortem.md  # 4) collect
+#                                                              # 5) revert snapshot
+```
 
 ## Uninstall
 

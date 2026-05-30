@@ -29,6 +29,13 @@ import threading
 import time
 from pathlib import Path
 
+from console import force_utf8
+
+# SCM 이 우리 main() 을 거치지 않고 서비스 클래스를 직접 호스팅할 수 있으므로
+# 모듈 로드 시점에 한 번 stdout/stderr 를 UTF-8 로 맞춰 둔다. Agent.start()
+# 의 비ASCII 출력이 cp949 Session 0 에서 죽는 것을 막는다.
+force_utf8()
+
 # Service constants
 SERVICE_NAME         = "RansomGuardAgent"
 SERVICE_DISPLAY_NAME = "RansomGuard EDR Agent"
@@ -138,6 +145,16 @@ if win32serviceutil is not None:
 
         def SvcStop(self):
             self.ReportServiceStatus(win32service.SERVICE_STOP_PENDING)
+            # Drop the critical-process flag the instant a stop is
+            # requested.  If the rest of shutdown hangs, raises, or the
+            # process is force-terminated before agent.stop() runs, the
+            # box must not bugcheck (CRITICAL_PROCESS_DIED -> reboot).
+            # Idempotent — agent.stop() also clears it on the clean path.
+            try:
+                import tamper
+                tamper.set_process_critical(False)
+            except Exception:
+                pass
             win32event.SetEvent(self._stop_evt)
 
         def SvcDoRun(self):

@@ -13,6 +13,7 @@ import sys
 import time
 from pathlib import Path
 
+from console import force_utf8
 from scoring import ScoringEngine, Signal, Severity
 from event_store import EventStore
 from detectors.canary import CanaryDetector
@@ -123,6 +124,13 @@ class Agent:
 
     def stop(self) -> None:
         print("[agent] stopping...")
+        # Drop the critical-process flag FIRST.  If anything below raises
+        # or hangs, the process must still be able to exit without a
+        # bugcheck (CRITICAL_PROCESS_DIED -> reboot).  Idempotent.
+        try:
+            tamper.set_process_critical(False)
+        except Exception:
+            pass
         # Clean shutdown: ask the kernel driver to drop every quarantined
         # PID so they aren't stuck on next agent start.  An unclean exit
         # leaves the list sticky on purpose (anti-tamper default).
@@ -132,15 +140,13 @@ class Agent:
             except Exception:
                 pass
         for d in self.detectors:
-            d.stop()
+            # One detector failing to stop must not skip the rest.
+            try:
+                d.stop()
+            except Exception as e:
+                print(f"[agent] detector {getattr(d, 'name', d)} stop failed: {e}")
         try:
             self.canary.cleanup()
-        except Exception:
-            pass
-        # Drop critical-process flag so the SCM can actually stop us
-        # without a bugcheck on a clean shutdown.
-        try:
-            tamper.set_process_critical(False)
         except Exception:
             pass
         print("[agent] stopped")
@@ -212,6 +218,7 @@ def parse_args():
 
 
 def main():
+    force_utf8()
     args = parse_args()
     watch = args.watch or [str(Path.cwd() / "test_watch_dir")]
     for d in watch:

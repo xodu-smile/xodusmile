@@ -18,16 +18,37 @@ Require-Admin
 $repoRoot = Get-RepoRoot
 $venvPy   = Join-Path $repoRoot '.venv\Scripts\python.exe'
 
+function Wait-ServiceStopped($svc, [int]$timeoutSec = 45) {
+    $deadline = (Get-Date).AddSeconds($timeoutSec)
+    while ((Get-Date) -lt $deadline) {
+        $s = Get-Service $svc -ErrorAction SilentlyContinue
+        if (-not $s)                  { return $true }
+        if ($s.Status -eq 'Stopped')  { return $true }
+        Start-Sleep -Milliseconds 500
+    }
+    return $false
+}
+
 function Stop-And-Remove($svc, $script) {
     if (-not (Get-Service $svc -ErrorAction SilentlyContinue)) {
         Write-Ok "$svc not installed"
         return
     }
     Write-Step "Stopping $svc"
+    # Ask the SCM to stop and WAIT until the service actually reaches
+    # STOPPED.  The agent clears its RtlSetProcessIsCritical flag during a
+    # clean stop; deleting the service or tearing the process down before
+    # that completes would kill a still-critical process and bugcheck the
+    # box (CRITICAL_PROCESS_DIED -> reboot).  Never force-kill here.
     & sc.exe stop $svc | Out-Null
-    Start-Sleep -Seconds 2
+    if (-not (Wait-ServiceStopped $svc 45)) {
+        Write-Warn2 "$svc did not reach STOPPED within 45s; NOT removing it (removing a still-critical process can bugcheck the machine).  Investigate, then re-run."
+        return
+    }
+    Write-Ok "$svc stopped cleanly"
+
     Write-Step "Removing $svc"
-    if (Test-Path $venvPy -and Test-Path $script) {
+    if ((Test-Path $venvPy) -and (Test-Path $script)) {
         & $venvPy $script remove
     } else {
         & sc.exe delete $svc | Out-Null

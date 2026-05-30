@@ -30,6 +30,11 @@ import sys
 import time
 from pathlib import Path
 
+from console import force_utf8
+
+# SCM 직접 호스팅 경로도 커버하도록 모듈 로드 시점에 UTF-8 로 맞춘다.
+force_utf8()
+
 WATCHDOG_INTERVAL_SECS = 5
 HEARTBEAT_MISS_THRESHOLD = 3
 

@@ -41,6 +41,20 @@ LegacyUninstall  = 1
 [DefaultUninstall.NTamd64.Services]
 DelService = %ServiceName%,0x200      ; SPSVCINST_STOPSERVICE
 
+[DefaultInstall.NTarm64]
+OptionDesc = %ServiceDescription%
+CopyFiles  = RansomGuard.DriverFiles
+
+[DefaultInstall.NTarm64.Services]
+AddService = %ServiceName%,,RansomGuard.Service
+
+[DefaultUninstall.NTarm64]
+DelFiles = RansomGuard.DriverFiles
+LegacyUninstall  = 1
+
+[DefaultUninstall.NTarm64.Services]
+DelService = %ServiceName%,0x200      ; SPSVCINST_STOPSERVICE
+
 ;
 ; Service installation
 ;

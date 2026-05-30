@@ -16,10 +16,20 @@
 param(
     [ValidateSet('Debug','Release')]
     [string] $Configuration = 'Release',
-    [string] $Platform = 'x64'
+    [ValidateSet('x64','ARM64')]
+    [string] $Platform
 )
 
 . "$PSScriptRoot\_common.ps1"
+
+# Default to the host architecture.  The kernel-mode driver toolset
+# (WindowsKernelModeDriver10.0) is only registered for the arch whose VS
+# build components are installed; on an ARM64 host, forcing x64 yields
+# MSB8020 ("build tools ... cannot be found").
+if (-not $Platform) {
+    $Platform = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'ARM64' } else { 'x64' }
+    Write-Ok "Platform not specified; defaulting to host arch: $Platform"
+}
 
 $repoRoot = Get-RepoRoot
 $sln = Join-Path $repoRoot 'minifilter\RansomGuard.sln'
@@ -55,6 +65,38 @@ if (-not (Test-WdkInstalled)) {
 } else {
     Write-Ok 'WDK detected'
 }
+
+Write-Step 'Restoring NuGet packages (WDK/SDK)'
+# packages.config 방식이라 'msbuild -t:restore' 로는 복원되지 않고 nuget.exe
+# 가 필요하다. nuget.exe 는 .gitignore 로 저장소에서 빠지므로, 없으면 공식
+# 배포본을 minifilter\nuget.exe 로 부트스트랩 다운로드한다. 복원물(packages\)
+# 역시 커밋 대상이 아니므로 각 머신에서 이 단계로 생성된다.
+$nuget = Join-Path $repoRoot 'minifilter\nuget.exe'
+if (-not (Test-Path $nuget)) {
+    if (Test-Command nuget) {
+        $nuget = (Get-Command nuget).Source
+        Write-Ok "PATH 의 nuget 사용: $nuget"
+    } else {
+        Write-Warn2 'nuget.exe 가 없음 — 공식 배포본을 내려받습니다.'
+        try {
+            [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+            Invoke-WebRequest `
+                -Uri 'https://dist.nuget.org/win-x86-commandline/latest/nuget.exe' `
+                -OutFile $nuget -UseBasicParsing
+            Write-Ok "nuget.exe 부트스트랩: $nuget"
+        } catch {
+            Write-Err2 "nuget.exe 다운로드 실패: $($_.Exception.Message)"
+            Write-Host '  수동 설치 후 재실행: winget install --id Microsoft.NuGet'
+            exit 1
+        }
+    }
+}
+& $nuget restore $sln -PackagesDirectory (Join-Path $repoRoot 'minifilter\packages')
+if ($LASTEXITCODE -ne 0) {
+    Write-Err2 "nuget restore exited with code $LASTEXITCODE"
+    exit $LASTEXITCODE
+}
+Write-Ok 'NuGet packages restored'
 
 Write-Step "Building $($sln | Split-Path -Leaf) ($Configuration|$Platform)"
 & $msbuild $sln `
