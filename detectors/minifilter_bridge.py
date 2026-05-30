@@ -458,7 +458,7 @@ class MinifilterBridge(Detector):
             # even when no detector wraps it.
             self.emit(Signal(
                 detector=self.name,
-                name="tamper_attempt",
+                name="tamper_blocked",
                 weight=50,
                 severity=Severity.HIGH,
                 message=(f"pid={int(evt.ParentProcessId)} tried to open "

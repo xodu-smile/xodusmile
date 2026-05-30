@@ -85,6 +85,16 @@ _PATTERNS = [
         ("system_policy_tamper", 40, Severity.MEDIUM,
          "Write to System policy key (UAC / SmartScreen / etc.)"),
     ),
+    (
+        "\\image file execution options",
+        ("ifeo_hijack", 60, Severity.HIGH,
+         "Write to Image File Execution Options (debugger hijack / persistence)"),
+    ),
+    (
+        "\\schedule\\taskcache",
+        ("schtasks_persistence", 35, Severity.MEDIUM,
+         "Write to scheduled-task cache (schtasks persistence)"),
+    ),
 ]
 
 
@@ -92,7 +102,7 @@ def _classify(key_path_lc: str):
     for needle, sig in _PATTERNS:
         if needle in key_path_lc:
             return sig
-    return ("registry_watched", 5, Severity.LOW, "Watched-key write")
+    return ("registry_other", 1, Severity.LOW, "Watched-key write")
 
 
 class RegistryKernelDetector(Detector):
