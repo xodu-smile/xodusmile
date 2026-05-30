@@ -171,43 +171,76 @@ cmdline 룰은 `ProcessCmdlineDetector.submit_external` 을 통해 가짜 이벤
 > 스냅샷이 있는 전용 VM 에서만** 실행하세요. 실제 검체는 watch dir 밖 시스템
 > 전체를 암호화해 VM 을 부팅 불능으로 만들 수 있습니다.
 
-검체를 터뜨리기 전후로 두 보조 도구를 씁니다.
+격리 VM 안에서 실검체를 터뜨려 탐지/대응 성적을 재는 절차입니다. 모든 명령은
+**VM 게스트의 관리자 PowerShell** 에서 실행합니다. 검체는 직접 준비하세요(이
+프로젝트는 검체를 배포하지 않습니다).
 
-**detonate 전 — 준비 점검 (`scripts/lab_preflight.ps1`)**
+**0) 준비** — 스냅샷 가능한 일회용 Windows 11 VM, `.\scripts\bootstrap.ps1` 로
+사용자 모드 설치(커널 차단까지 볼 거면 WDK/VS Build Tools 도 — `설치` 섹션 참고).
 
-격리 상태를 점검하고 GO / NO-GO 를 출력합니다. BLOCKER(물리 머신, 진짜 인터넷
-도달, 스냅샷 미확인)가 하나라도 있으면 `exit 1` 로 막습니다.
+**1) VM 격리** — 어댑터를 Host-only/Internal 로(NAT·브리지 금지), 공유 폴더·
+클립보드·드래그앤드롭 모두 OFF. (4단계 pre-flight 가 다시 확인합니다.)
+
+**2) 미니필터 로드** — 커널 신호/차단을 테스트할 때만. 생략 시
+`agent.py --no-minifilter`.
 
 ```powershell
-# 관리자 PowerShell, 격리 VM 안에서
+bcdedit /set testsigning on; shutdown /r /t 0   # 테스트 서명 ON → 재부팅
+.\scripts\build_driver.ps1                       # 빌드 (호스트 arch 자동)
+.\scripts\install_driver.ps1                     # 설치 + 시작
+fltmc filters | Select-String RansomGuard        # 적재 확인
+```
+
+**3) 에이전트 실행** — 검체보다 먼저 띄웁니다(변조 방지 ON + `kill` 기본값).
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+python agent.py --watch C:\Users\you\Documents   # 진행은 콘솔 로그로 관찰
+```
+
+> ⚠ detonate 중 **테스트 VM 에서 브라우저를 띄우지 마세요.** Edge/Chrome 가
+> 휴리스틱을 오염시켜 검체 대신 브라우저가 잡힙니다. 대시보드는 detonate 전에만
+> 잠깐 보거나 7단계 postmortem 으로 봅니다. 변조 방지 ON 상태에서 검체가
+> 에이전트를 죽이려 하면 의도적으로 BSOD 가 날 수 있어 스냅샷이 필수입니다.
+
+**4) pre-flight GO/NO-GO** — 격리 재점검 + 디코이 배치 + 스냅샷 확인.
+
+```powershell
 .\scripts\lab_preflight.ps1 -WatchDir C:\Users\you\Documents -Count 500
 ```
 
-점검 항목: VM 여부 · 네트워크 격리 · 호스트 공유 채널 · testsigning · 드라이버/
-에이전트 로드 · 디코이 더미 파일 생성 · 스냅샷 확인(직접 타이핑).
+점검: VM·네트워크 격리·공유 채널·testsigning·**Defender 실시간 보호**·드라이버/
+에이전트 로드·디코이·스냅샷. BLOCKER 가 있으면 `NO-GO`(exit 1)로 막힙니다.
 
-**detonate 후 — 성적 집계 (`postmortem.py`)**
+**5) 깨끗한 스냅샷** — 4단계 스냅샷 프롬프트에서, 에이전트 실행 + 디코이 채워진 +
+검체 미실행 상태로 VM 스냅샷을 찍고 `I HAVE A SNAPSHOT` 입력 → `GO`.
 
-에이전트가 죽거나 BSOD 가 나도 동작하도록, 디스크에 영속된 데이터(`detector.db`,
-`reports/`, watch dir)만 읽어 결과를 집계합니다.
+**6) detonate** — `GO` 이후에만.
 
 ```powershell
-# 스냅샷 복원 전에 실행
+# (a) Defender 비켜주기 — 안 끄면 압축 해제 순간 검체가 삭제됩니다
+#     ("빈 폴더 + 비번창 안 뜸"의 원인). Windows 보안 UI 에서 변조 방지를
+#     먼저 끈 뒤:
+Set-MpPreference -DisableRealtimeMonitoring $true   # 또는 -ExclusionPath 'C:\sample'
+# (b) 검체를 watch dir *밖*(예: C:\sample)에 압축 해제 → 실행
+```
+
+> ⚠ Defender 끄기는 **격리 VM 에서만**, 테스트 후 반드시 스냅샷 복원. 종료된
+> PID 가 브라우저가 아니라 검체인지 콘솔 로그로 확인하세요.
+
+**7) 집계** — 디스크 영속 데이터만 읽어 성적을 냅니다(BSOD 나도 동작). 스냅샷
+복원 전에 실행.
+
+```powershell
 python postmortem.py --watch C:\Users\you\Documents --out postmortem.md
 ```
 
-출력: 탐지/대응 지연 타임라인 · 탐지기·심각도 분포 · quarantine/kill 집계 ·
-디코이 손상 비율(= 탐지 전 피해량) · 첫 대응 이후 추가 손상 · 랜섬노트 후보.
+**8) 스냅샷 복원** — 5단계 지점으로 되돌립니다. **검체가 묻은 VM 은 재사용 금지.**
 
-**전체 흐름**
-
-```powershell
-python agent.py --watch C:\Users\you\Documents                 # 1) 에이전트 (변조 방지 ON)
-.\scripts\lab_preflight.ps1 -WatchDir C:\Users\you\Documents   # 2) GO 확인 → VM 스냅샷
-#                                                              # 3) 검체 detonate (격리 VM)
-python postmortem.py --watch C:\Users\you\Documents --out postmortem.md  # 4) 집계
-#                                                              # 5) 스냅샷 복원
-```
+> **재테스트 체크리스트:** preflight 로 디코이 채우기 → 브라우저 등 종료 →
+> Defender 비켜주기 → 검체 실행 → 잡힌 게 브라우저(msedge/chrome)가 아니라 진짜
+> 검체인지 확인. responder 로그에 `observed only (no corroboration)` 로만 남고
+> 종료 안 된 항목은 정상(오탐 후보를 흘려보낸 것)입니다.
 
 ---
 

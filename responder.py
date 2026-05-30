@@ -15,10 +15,23 @@ Operating modes:
                                  process alive for forensic capture
   - ``ResponderMode.KILL``       step 1 + step 2 (default for production)
 
-The default trigger fires when a single signal of severity HIGH or
-CRITICAL carries a ``pid`` in its metadata.  We also fire when the
-rolling score crosses the CRITICAL threshold, in which case we kill every
-PID that has contributed to the score in the active window.
+Targeting is deliberately *narrow*.  We only ever act on the exact PID a
+signal names — there is no "score crossed CRITICAL, sweep every PID in
+the window" path (that turned isolated false positives into mass kills,
+and leaned entirely on the never-kill list to spare benign processes).
+
+A PID is acted on only when the evidence is strong enough:
+
+  - a CRITICAL signal (e.g. ``vssadmin delete shadows``) — unambiguous
+    pre-encryption sabotage, high-confidence on its own; or
+  - a HIGH signal *corroborated* by independent evidence: real
+    file-encryption activity somewhere in the window (see
+    ``ScoringEngine.has_encryption_activity``), or a second distinct
+    detector that also flagged the same PID.
+
+A lone HIGH heuristic (e.g. ``explorer.exe -> rundll32.exe``) with no
+corroboration is recorded but NOT acted on — the never-kill list is a
+backstop, not the primary defence.
 
 Termination strategy on Windows:
 
@@ -76,6 +89,10 @@ NEVER_KILL = {
     # 시스템 서비스 (추가)
     "svchost.exe", "wininit.exe", "spoolsv.exe", "audiodg.exe",
     "conhost.exe", "taskhostw.exe", "runtimebroker.exe",
+
+    # Win11 셸/호스트 헬퍼 (추가) — 정상 부모-자식 체인의 단골 오탐 대상
+    "rundll32.exe", "regsvr32.exe", "dllhost.exe", "sihost.exe",
+    "ctfmon.exe", "dashost.exe", "wmiprvse.exe",
     
     # 개발 도구 (추가)
     "devenv.exe", "code.exe", "node.exe", "powershell.exe",
@@ -158,15 +175,19 @@ class ProcessResponder:
     # ---------------------------------------------------- signal callbacks
 
     def _dispatch(self, sig: Signal, score: int, level: Severity) -> None:
-        # 1. PID-scoped reaction: any HIGH/CRITICAL signal that names a PID.
+        # PID-scoped reaction only — no score-wide sweep.  A signal must
+        # both name a PID and clear the confidence bar before we touch it.
         pid = self._extract_pid(sig)
-        if pid and sig.severity in (Severity.HIGH, Severity.CRITICAL):
-            self._respond_to_pid(pid, f"{sig.detector}/{sig.name}")
+        if not pid or sig.severity not in (Severity.HIGH, Severity.CRITICAL):
+            return
 
-        # 2. Score-wide reaction: if the rolling score went CRITICAL, sweep
-        #    every PID that has contributed in the current window.
-        if score >= self.critical_threshold:
-            self._sweep_window()
+        reason = f"{sig.detector}/{sig.name}"
+        if self._is_confident(pid, sig):
+            self._respond_to_pid(pid, reason)
+        else:
+            # Suspicious but uncorroborated — log intent, take no action.
+            # The dashboard still shows it so an operator can judge.
+            self._record_observed(pid, reason)
 
     def _extract_pid(self, sig: Signal) -> Optional[int]:
         meta = sig.metadata or {}
@@ -176,14 +197,30 @@ class ProcessResponder:
                 return val
         return None
 
-    def _sweep_window(self) -> None:
-        pids: Set[int] = set()
-        for sig in self.engine.recent_signals(limit=200):
-            pid = self._extract_pid(sig)
-            if pid:
-                pids.add(pid)
-        for pid in pids:
-            self._respond_to_pid(pid, "score_critical_sweep")
+    def _is_confident(self, pid: int, sig: Signal) -> bool:
+        """Decide whether the evidence justifies acting on ``pid``.
+
+        CRITICAL signals (pre-encryption sabotage like VSS deletion) act on
+        their own.  A HIGH signal needs corroboration: real encryption
+        activity in the window, or a second distinct detector naming the
+        same PID.
+        """
+        if sig.severity == Severity.CRITICAL:
+            return True
+
+        # Real file-encryption/destruction observed elsewhere (excluding the
+        # triggering signal itself) corroborates a HIGH heuristic.
+        if self.engine.has_encryption_activity(exclude=sig):
+            return True
+
+        # Or: two or more distinct detectors independently flagged this PID.
+        detectors: Set[str] = set()
+        for other in self.engine.recent_signals(limit=200):
+            if self._extract_pid(other) == pid:
+                detectors.add(other.detector)
+            if len(detectors) >= 2:
+                return True
+        return False
 
     # ---------------------------------------------------- core kill logic
 
@@ -240,6 +277,15 @@ class ProcessResponder:
         action = KillAction(time.time(), pid, "", "", reason,
                             self.mode.value, quarantined=False,
                             terminated=False, error=why)
+        return self._record(action)
+
+    def _record_observed(self, pid: int, reason: str) -> KillAction:
+        """A suspicious-but-uncorroborated HIGH signal: record, don't act."""
+        proc_name, cmdline = self._lookup(pid)
+        action = KillAction(time.time(), pid, proc_name, cmdline, reason,
+                            self.mode.value, quarantined=False,
+                            terminated=False,
+                            error="observed only (no corroboration)")
         return self._record(action)
 
     def _record(self, action: KillAction) -> KillAction:

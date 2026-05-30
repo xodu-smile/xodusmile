@@ -39,6 +39,18 @@ WRITE_BURST_WINDOW = 2.0
 FANOUT_THRESHOLD = 12                     # 같은 부모가 윈도우 안에 자식 N개 이상
 FANOUT_WINDOW = 5.0
 
+# 정상적으로 자식 프로세스를 대량 spawn 하는 멀티프로세스 앱 — fan-out 면제.
+# (브라우저는 탭/렌더러마다, 그 외 런타임은 워커마다 프로세스를 띄운다.)
+# 이름은 소문자 비교.
+MULTIPROCESS_APPS = {
+    "chrome.exe", "msedge.exe", "edge.exe", "firefox.exe", "brave.exe",
+    "opera.exe", "iexplore.exe", "vivaldi.exe", "chromium.exe",
+    "code.exe", "devenv.exe", "node.exe", "electron.exe",
+    "explorer.exe", "svchost.exe", "services.exe", "runtimebroker.exe",
+    "wmiprvse.exe", "backgroundtaskhost.exe", "msbuild.exe",
+    "onedrive.exe", "teams.exe", "slack.exe", "discord.exe",
+}
+
 # 부모-자식 chain 룰 (parent_name → child_name 이 의심)
 # Win11 LOLBin 기준. 이름은 모두 소문자 비교.
 SCRIPT_HOSTS = {
@@ -241,13 +253,20 @@ class ProcessWatcher(Detector):
                 },
             ))
 
-        # 3) 동일 부모의 fan-out 추적
+        # 3) 동일 부모의 fan-out 추적.
+        #    브라우저/런타임 등 정상 멀티프로세스 앱은 면제하고, 그 외에도
+        #    실제 암호화 활동과 상관(correlation)이 있을 때만 가중한다.
+        #    (단독 fan-out 은 평상시 오탐이 잦아 신호로서 가치가 낮다.)
         bucket = self._fanout[snap.ppid]
         bucket.append(time.time())
         cutoff = time.time() - FANOUT_WINDOW
         while bucket and bucket[0] < cutoff:
             bucket.popleft()
-        if len(bucket) >= FANOUT_THRESHOLD:
+        if parent_name in MULTIPROCESS_APPS:
+            bucket.clear()
+            return
+        if (len(bucket) >= FANOUT_THRESHOLD
+                and self.engine.has_encryption_activity()):
             self.emit(Signal(
                 detector=self.name,
                 name="child_fanout",

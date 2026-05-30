@@ -35,7 +35,7 @@ installed, and produces `minifilter\build\x64\Release\RansomGuard.sys`
 Requires test signing to be enabled (`bcdedit /set testsigning on`, then
 reboot) unless the `.sys` carries an attestation-signed catalog. The
 script copies the driver to `%windir%\system32\drivers`, installs the
-`.inf`, and starts the filter (`sc start RansomGuard`).
+`.inf`, and loads the filter (`fltmc load RansomGuard`).
 
 To uninstall:
 

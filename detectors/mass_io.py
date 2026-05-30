@@ -77,6 +77,26 @@ SUSPICIOUS_EXTENSIONS = {
     ".lockbit",
 }
 
+# 정상 프로그램이 끊임없이 쓰고 지우는 노이즈 경로/확장자.  이 경로의 변경은
+# 암호화 신호로 치지 않는다 (Edge BrowserMetrics, 패키지 앱 캐시, 임시파일 등).
+# 경로는 소문자 부분 일치.
+NOISE_PATH_FRAGMENTS = (
+    "\\appdata\\local\\packages\\",
+    "\\appdata\\local\\microsoft\\",
+    "\\appdata\\locallow\\",
+    "browsermetrics",
+    "\\inetcache\\", "\\webcache",
+    "\\temp\\", "\\tmp\\",
+    "\\cache\\", "\\code cache\\", "\\gpucache\\", "\\cache_data\\",
+    "\\indexeddb\\", "\\service worker\\",
+    "\\crashpad", "\\crashdumps\\",
+    "\\$recycle.bin\\", "\\system volume information\\",
+)
+NOISE_EXTENSIONS = {
+    ".tmp", ".temp", ".log", ".etl", ".ldb", ".lock",
+    ".crdownload", ".part", ".partial", ".pma", ".dmp",
+}
+
 
 def shannon_entropy(data: bytes) -> float:
     if not data:
@@ -159,11 +179,22 @@ class MassIODetector(Detector):
 
     # ---- file event hooks ----
 
-    def on_modified(self, path: Path) -> None:
-        if not path.is_file():
-            return
+    @staticmethod
+    def _is_noise(path: Path) -> bool:
+        """정상 프로그램의 캐시/임시파일 변경인지 — 암호화 신호에서 제외."""
+        if path.suffix.lower() in NOISE_EXTENSIONS:
+            return True
+        p = str(path).lower()
+        return any(frag in p for frag in NOISE_PATH_FRAGMENTS)
+
+    def _count_encryption_event(self) -> None:
+        """burst 카운터에는 '암호화 특징' 이벤트만 누적한다."""
         with self._lock:
             self._modify_times.append(time.time())
+
+    def on_modified(self, path: Path) -> None:
+        if not path.is_file() or self._is_noise(path):
+            return
 
         # 엔트로피 + 매직바이트 분석
         try:
@@ -182,6 +213,7 @@ class MassIODetector(Detector):
 
         # 시그널 1: 매직바이트 소실 (이전엔 알려진 형식, 지금은 알 수 없음)
         if prev_magic and prev_magic != "UNKNOWN" and magic is None:
+            self._count_encryption_event()
             self.emit(Signal(
                 detector=self.name, name="magic_bytes_lost",
                 weight=W_MAGIC_LOST,
@@ -195,6 +227,7 @@ class MassIODetector(Detector):
         if ent >= ENTROPY_THRESHOLD and magic is None:
             ext = path.suffix.lower()
             if ext in TARGET_EXTENSIONS:
+                self._count_encryption_event()
                 self.emit(Signal(
                     detector=self.name, name="high_entropy_write",
                     weight=W_HIGH_ENTROPY_WRITE,
@@ -205,8 +238,9 @@ class MassIODetector(Detector):
                 ))
 
     def on_moved(self, src: Path, dest: Path) -> None:
-        ext = dest.suffix.lower()
-        if ext in SUSPICIOUS_EXTENSIONS:
+        # rename 자체는 노이즈가 많고, '의심 확장자로의 변경'만 암호화 특징이다.
+        if dest.suffix.lower() in SUSPICIOUS_EXTENSIONS:
+            self._count_encryption_event()
             self.emit(Signal(
                 detector=self.name, name="suspicious_extension",
                 weight=W_SUSPICIOUS_EXT * 3,  # 강한 시그널
@@ -215,12 +249,11 @@ class MassIODetector(Detector):
                         f"{src.name} -> {dest.name}",
                 metadata={"src": str(src), "dest": str(dest)},
             ))
-        with self._lock:
-            self._modify_times.append(time.time())
 
     def on_created(self, path: Path) -> None:
-        with self._lock:
-            self._modify_times.append(time.time())
+        # 파일 생성 자체는 암호화 특징이 아니므로 burst 로 치지 않는다.
+        # (엔트로피/매직 변화는 후속 on_modified 에서 평가된다.)
+        return
 
     # ---- burst detection ----
 
@@ -236,8 +269,8 @@ class MassIODetector(Detector):
                 detector=self.name, name="modify_burst",
                 weight=W_BURST_MODIFY,
                 severity=Severity.HIGH,
-                message=f"File modification burst: {count} changes "
-                        f"in {BURST_WINDOW_SEC}s",
+                message=f"Encryption-pattern burst: {count} high-entropy/"
+                        f"magic-loss/suspicious-rename events in {BURST_WINDOW_SEC}s",
                 metadata={"count": count, "window_sec": BURST_WINDOW_SEC},
             ))
             # 한 번 알린 뒤 윈도우 비워서 폭주 방지

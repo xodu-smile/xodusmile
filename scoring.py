@@ -51,6 +51,20 @@ THRESHOLD_CRITICAL = 150
 # 시그널 누적 윈도우 (초). 이보다 오래된 시그널은 점수에서 제외
 SIGNAL_WINDOW_SECONDS = 120
 
+# 실제 파일 암호화/파괴가 진행 중임을 가리키는 시그널 이름들.
+# "단지 의심스러운 프로세스 행위"(체인/fan-out 등)와 구분하기 위한 집합이다.
+#   - 휴리스틱(체인, fan-out)을 이 활동과 상관(correlation) 있을 때만 가중하고
+#   - responder 가 PID 를 죽이기 전에 이 활동을 corroboration 으로 요구한다.
+ENCRYPTION_SIGNAL_NAMES = frozenset({
+    # mass_io (파일 내용 기반)
+    "magic_bytes_lost", "high_entropy_write", "modify_burst",
+    "suspicious_extension",
+    # canary (고신뢰 미끼 파일)
+    "canary_modified", "canary_deleted",
+    # 커널 미니필터 (PID 단위 관측)
+    "kernel_write_burst", "kernel_rename_burst", "kernel_blocked_op",
+})
+
 
 class ScoringEngine:
     """
@@ -96,6 +110,21 @@ class ScoringEngine:
         with self._lock:
             self._evict_old()
             return list(self._signals)[-limit:]
+
+    def has_encryption_activity(self, exclude: Optional[Signal] = None) -> bool:
+        """현재 윈도우 안에 실제 암호화/파괴 시그널이 있는지.
+
+        ``exclude`` 로 넘긴 시그널 자신은 제외한다 — "방금 들어온 이 신호
+        하나"만으로 corroboration 이 성립하지 않게 하기 위함.
+        """
+        with self._lock:
+            self._evict_old()
+            for s in self._signals:
+                if s is exclude:
+                    continue
+                if s.name in ENCRYPTION_SIGNAL_NAMES:
+                    return True
+        return False
 
     def reset(self) -> None:
         with self._lock:

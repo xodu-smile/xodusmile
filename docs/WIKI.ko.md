@@ -176,7 +176,8 @@ weight, severity, message, metadata, score_after, level_after)` +
 | `attach()` | 엔진 구독. 멱등. |
 | `actions(limit=50)` | 대시보드용 이력. |
 | `manual_kill(pid, reason)` / `manual_release(pid)` | 대시보드 버튼이 도달하는 곳. |
-| `_dispatch(sig, score, level)` | (1) PID 가 있는 HIGH/CRITICAL 시그널 → `_respond_to_pid`; (2) 점수 ≥ CRITICAL → `_sweep_window`. |
+| `_dispatch(sig, score, level)` | PID 가 있는 HIGH/CRITICAL 시그널만 처리. `_is_confident()` 통과 시 `_respond_to_pid`, 아니면 `_record_observed`(무대응 기록). **점수 기반 전체 PID 스윕은 폐지** — 오탐을 대량 학살로 키우고 never-kill 목록에만 의존하던 구조였음. |
+| `_is_confident(pid, sig)` | CRITICAL 단독은 고신뢰로 대응. HIGH 는 corroboration 필요 — 윈도우 내 실제 암호화 활동(`ScoringEngine.has_encryption_activity`) 또는 같은 PID 를 가리키는 서로 다른 탐지기 2개 이상. |
 | `_respond_to_pid(pid, reason)` | self-pid 거부 → never-kill 확인 → minifilter 격리 → `psutil.kill()` 후 ctypes `OpenProcess + TerminateProcess` 폴백. |
 | `_record(action)` | append, 1000 으로 캡, 콘솔 출력, `on_action` 호출. |
 
@@ -616,13 +617,13 @@ dot-source 헬퍼 모듈. `Set-StrictMode -Version Latest`,
 
 관리자 전용. 빌드 산출물 확인 → `bcdedit … testsigning` 꺼져 있으면
 경고 → `rundll32 setupapi.dll,InstallHinfSection DefaultInstall 132
-RansomGuard.inf` → `sc.exe start RansomGuard` (`1056 =
-ERROR_SERVICE_ALREADY_RUNNING` 은 허용) → `fltmc filters` 중
-`RansomGuard` 행 출력.
+RansomGuard.inf` → `fltmc load RansomGuard` → `fltmc filters` 에
+`RansomGuard` 가 보이면 성공으로 간주(이미 로드돼 load 가 nonzero 여도
+목록에 있으면 OK).
 
 ### 8.6 `scripts/uninstall_driver.ps1`
 
-관리자 전용. `sc.exe stop RansomGuard` → `rundll32
+관리자 전용. `fltmc unload RansomGuard` → `rundll32
 setupapi.dll,InstallHinfSection DefaultUninstall 132` (또는 폴백으로
 `sc.exe delete RansomGuard`) →
 `%windir%\System32\drivers\RansomGuard.sys` 삭제.

@@ -4,7 +4,7 @@
 
 .DESCRIPTION
     Copies the built .sys to %windir%\system32\drivers, installs the .inf
-    via setupapi, and starts the filter (`sc start RansomGuard`).
+    via setupapi, and loads the filter (`fltmc load RansomGuard`).
 
     Requires:
       - Elevated PowerShell (Run as Administrator).
@@ -52,7 +52,7 @@ if ($bcd -match 'testsigning\s+Yes') {
     Write-Host  '  Unsigned drivers will fail to load.  Enable with:'
     Write-Host  '      bcdedit /set testsigning on'
     Write-Host  '      shutdown /r /t 0'
-    Write-Host  '  (Continuing; the SC start call below will fail clearly'
+    Write-Host  '  (Continuing; the fltmc load below will fail clearly'
     Write-Host  '   if the driver cannot be loaded.)'
 }
 
@@ -61,16 +61,20 @@ $rundll = "$env:windir\System32\rundll32.exe"
 Invoke-CheckedExe $rundll @('setupapi.dll,InstallHinfSection', 'DefaultInstall', '132', $inf)
 Write-Ok 'inf installed'
 
-Write-Step 'Starting filter'
-& sc.exe start RansomGuard | Out-Host
-if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne 1056) {
-    # 1056 = ERROR_SERVICE_ALREADY_RUNNING; harmless.
-    Write-Err2 "sc start exited with code $LASTEXITCODE"
-    exit $LASTEXITCODE
-}
+Write-Step 'Loading the minifilter (fltmc load)'
+& fltmc.exe load RansomGuard | Out-Host
+$loadExit = $LASTEXITCODE
 
+# fltmc load returns nonzero if the filter is already loaded; rather than
+# whitelist HRESULTs, treat "shows up in fltmc filters" as the source of truth.
 Write-Step 'Filter status'
-& fltmc.exe filters | Select-String -Pattern 'RansomGuard' | ForEach-Object { Write-Ok $_ }
+$loaded = & fltmc.exe filters | Select-String -Pattern 'RansomGuard'
+if ($loaded) {
+    $loaded | ForEach-Object { Write-Ok $_ }
+} else {
+    Write-Err2 "fltmc load failed (exit=$loadExit); RansomGuard is not listed in 'fltmc filters'."
+    exit ($(if ($loadExit -ne 0) { $loadExit } else { 1 }))
+}
 
 Write-Host ''
 Write-Host '  Driver is loaded.  Start the user-mode agent with:'

@@ -22,8 +22,8 @@ if (-not $Platform) {
 $repoRoot = Get-RepoRoot
 $inf = Join-Path $repoRoot "minifilter\build\$Platform\$Configuration\RansomGuard.inf"
 
-Write-Step 'Stopping the filter (if running)'
-& sc.exe stop RansomGuard | Out-Host
+Write-Step 'Unloading the filter (if loaded)'
+& fltmc.exe unload RansomGuard | Out-Host
 
 Write-Step 'Uninstalling .inf'
 if (Test-Path $inf) {

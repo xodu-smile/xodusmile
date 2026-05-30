@@ -19,6 +19,7 @@
       2. (BLOCKER) 네트워크 격리 — 진짜 인터넷에 닿으면 중단
       3. (WARN)    호스트 공유 채널(VMware/VirtualBox shared folders)
       4. (WARN)    testsigning 상태 (미니필터 로드용)
+      4b.(WARN)    Microsoft Defender 실시간 보호 (켜져 있으면 검체 삭제)
       5. (WARN)    RansomGuard 필터/서비스 로드 여부
       6. (WARN)    에이전트 프로세스 실행 여부
       7. (INFO)    대시보드 응답 여부
@@ -161,6 +162,32 @@ try {
     }
 } catch {
     Add-Warning "testsigning 상태를 읽을 수 없음 ($($_.Exception.Message))."
+}
+
+# ---------------------------------------------------------------------------
+# 4b. (WARN) Microsoft Defender 실시간 보호 — 검체를 삼킬 수 있음
+# ---------------------------------------------------------------------------
+# 실제 랜섬웨어 PE 는 압축을 푸는 순간 디스크에 떨어지는데, Defender 실시간
+# 보호가 켜져 있으면 그 자리에서 격리/삭제한다 → "압축 풀었더니 빈 폴더,
+# 비번창도 안 뜸" 증상의 원인.  우리 EDR 을 시험 대상으로 두려면 격리 VM
+# 안에서만 Defender 를 비켜줘야 한다.
+Write-Step "Microsoft Defender 실시간 보호 확인 (검체 보존용)"
+try {
+    $mp = Get-MpComputerStatus -ErrorAction Stop
+    if ($mp.RealTimeProtectionEnabled) {
+        Add-Warning ("Defender 실시간 보호가 ON — 압축 해제 시 검체가 즉시 삭제되어 " +
+            "'빈 폴더'가 될 수 있습니다. 격리 VM 에서만: (1) Windows 보안 UI 에서 " +
+            "변조 방지(Tamper Protection) 끄기 → (2) Set-MpPreference -DisableRealtimeMonitoring `$true " +
+            "또는 Add-MpPreference -ExclusionPath <스테이징 폴더>.")
+    } else {
+        Write-Ok "Defender 실시간 보호 OFF (검체가 보존됨)"
+    }
+    if ($mp.IsTamperProtected) {
+        Add-Warning "Defender 변조 방지(Tamper Protection)가 ON — 실시간 보호를 끄려면 Windows 보안 UI 에서 먼저 변조 방지를 꺼야 합니다(스크립트로는 불가)."
+    }
+} catch {
+    # Defender 가 아예 없거나(서버 코어 등) 모듈 미설치면 검체 삭제 위험은 낮음.
+    Write-Ok "Defender 상태를 읽을 수 없음 — 미설치/비활성으로 간주 ($($_.Exception.Message))."
 }
 
 # ---------------------------------------------------------------------------

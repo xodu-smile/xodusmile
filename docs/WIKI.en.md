@@ -177,7 +177,8 @@ who to quarantine/kill, executes it, and records `KillAction` rows.
 | `attach()` | Subscribe to the engine. Idempotent. |
 | `actions(limit=50)` | History for the dashboard. |
 | `manual_kill(pid, reason)` / `manual_release(pid)` | Dashboard buttons land here. |
-| `_dispatch(sig, score, level)` | (1) any HIGH/CRITICAL signal naming a PID → `_respond_to_pid`; (2) score ≥ CRITICAL → `_sweep_window`. |
+| `_dispatch(sig, score, level)` | Only HIGH/CRITICAL signals naming a PID. If `_is_confident()` passes → `_respond_to_pid`, else `_record_observed` (logged, no action). **The score-wide PID sweep is removed** — it turned isolated false positives into mass kills and relied solely on the never-kill list. |
+| `_is_confident(pid, sig)` | CRITICAL acts on its own. HIGH needs corroboration: real encryption activity in the window (`ScoringEngine.has_encryption_activity`) or a second distinct detector naming the same PID. |
 | `_respond_to_pid(pid, reason)` | Self-pid refusal → never-kill check → quarantine via minifilter → terminate via `psutil.kill()` then ctypes `OpenProcess + TerminateProcess`. |
 | `_record(action)` | Append, cap history at 1000, console-log, fire `on_action`. |
 
@@ -631,13 +632,13 @@ everything in one go.
 Admin-only.  Verifies the built artifacts exist, warns if
 `bcdedit … testsigning` is off, runs
 `rundll32 setupapi.dll,InstallHinfSection DefaultInstall 132 RansomGuard.inf`,
-then `sc.exe start RansomGuard` (tolerates exit `1056 =
-ERROR_SERVICE_ALREADY_RUNNING`), and prints `fltmc filters` rows that
-match `RansomGuard`.
+then `fltmc load RansomGuard`, and treats presence in `fltmc filters` as
+the source of truth (a nonzero load exit when already loaded is fine as
+long as the filter is listed).
 
 ### 8.6 `scripts/uninstall_driver.ps1`
 
-Admin-only.  `sc.exe stop RansomGuard` → `rundll32
+Admin-only.  `fltmc unload RansomGuard` → `rundll32
 setupapi.dll,InstallHinfSection DefaultUninstall 132` (or `sc.exe
 delete RansomGuard` as a fallback) → removes
 `%windir%\System32\drivers\RansomGuard.sys`.
