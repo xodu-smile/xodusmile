@@ -222,6 +222,14 @@ python agent.py --watch C:\Users\you\Documents   # 진행은 콘솔 로그로 �
 #     ("빈 폴더 + 비번창 안 뜸"의 원인). Windows 보안 UI 에서 변조 방지를
 #     먼저 끈 뒤:
 Set-MpPreference -DisableRealtimeMonitoring $true   # 또는 -ExclusionPath 'C:\sample'
+
+# (a-1) 진짜 꺼졌는지 확인 — 변조 방지(IsTamperProtected)가 켜져 있으면 위
+#       명령은 에러 없이 무시됩니다. RealTimeProtectionEnabled 가 False 여야 함.
+Get-MpComputerStatus | Select-Object RealTimeProtectionEnabled, IsTamperProtected, AntivirusEnabled
+#   RealTimeProtectionEnabled=True 또는 IsTamperProtected=True 면 → 아직 안 꺼진
+#   것. 보안 UI에서 변조 방지부터 끄고 (a) 다시 실행. (검체가 이미 삭제됐다면
+#   "보안 기록 > 격리된 항목" 또는 MpCmdRun.exe -Restore -ListAll 로 복원 가능.)
+
 # (b) 검체를 watch dir *밖*(예: C:\sample)에 압축 해제 → 실행
 ```
 

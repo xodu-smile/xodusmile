@@ -207,6 +207,31 @@ Reports: detection/response latency timeline · detector & severity
 breakdown · quarantine/kill tally · decoy damage ratio (= pre-detection
 loss) · files damaged after first response · ransom-note candidates.
 
+**Detonate — disable Defender first**
+
+```powershell
+# (a) Get Defender out of the way — if you don't, the sample is deleted the
+#     instant you extract it (the cause of "empty folder + no password prompt").
+#     Turn OFF Tamper Protection in the Windows Security UI first, then:
+Set-MpPreference -DisableRealtimeMonitoring $true   # or -ExclusionPath 'C:\sample'
+
+# (a-1) Confirm it actually took — if Tamper Protection (IsTamperProtected) is
+#       on, the command above is silently ignored. RealTimeProtectionEnabled
+#       must read False.
+Get-MpComputerStatus | Select-Object RealTimeProtectionEnabled, IsTamperProtected, AntivirusEnabled
+#   RealTimeProtectionEnabled=True or IsTamperProtected=True means it is NOT off
+#   yet — disable Tamper Protection in the UI and re-run (a). (If the sample was
+#   already deleted, restore it from "Security > Protection history > Quarantined
+#   items" or MpCmdRun.exe -Restore -ListAll.)
+
+# (b) Extract the sample *outside* the watch dir (e.g. C:\sample), then run it.
+```
+
+> ⚠ Disabling Defender is **for the isolated VM only**; always revert the
+> snapshot afterwards. Note that RansomGuard's responder only terminates
+> processes (`responder.py`) — it never deletes files, so an emptied folder
+> is Defender, not this tool.
+
 **Full flow**
 
 ```powershell
