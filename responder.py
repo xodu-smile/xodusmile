@@ -57,7 +57,8 @@ try:
 except ImportError:
     HAS_PSUTIL = False
 
-from scoring import ScoringEngine, Signal, Severity, THRESHOLD_CRITICAL
+from scoring import (ScoringEngine, Signal, Severity, THRESHOLD_CRITICAL,
+                     ENCRYPTION_SIGNAL_NAMES)
 
 
 class ResponderMode(str, Enum):
@@ -177,11 +178,29 @@ class ProcessResponder:
     def _dispatch(self, sig: Signal, score: int, level: Severity) -> None:
         # PID-scoped reaction only — no score-wide sweep.  A signal must
         # both name a PID and clear the confidence bar before we touch it.
-        pid = self._extract_pid(sig)
-        if not pid or sig.severity not in (Severity.HIGH, Severity.CRITICAL):
+        if sig.severity not in (Severity.HIGH, Severity.CRITICAL):
             return
 
         reason = f"{sig.detector}/{sig.name}"
+        pid = self._extract_pid(sig)
+
+        # Pre-emptive path: a high-confidence indicator that names NO pid
+        # (e.g. the file-polling canary) would otherwise just add to the
+        # score and never trigger a response.  Attribute it to the dominant
+        # file-mutating pid in the window and act *immediately* — without
+        # waiting for the global score to crawl up to CRITICAL.  Since the
+        # pid is inferred (not named by the signal) we cap the action at
+        # QUARANTINE so a mis-attribution can't kill the wrong process.
+        if pid is None:
+            if sig.name in ENCRYPTION_SIGNAL_NAMES:
+                culprit = self._correlate_pid(sig)
+                if culprit is not None:
+                    self._respond_to_pid(culprit, f"{reason} [correlated]",
+                                         cap_quarantine=True)
+                else:
+                    self._record_observed(0, f"{reason} [no pid to attribute]")
+            return
+
         if self._is_confident(pid, sig):
             self._respond_to_pid(pid, reason)
         else:
@@ -222,9 +241,34 @@ class ProcessResponder:
                 return True
         return False
 
+    def _correlate_pid(self, sig: Signal) -> Optional[int]:
+        """Best-guess the pid behind a pid-less indicator (e.g. canary).
+
+        Tally how many file-mutation signals each pid produced in the
+        current window and return the clear leader.  If a runner-up is at
+        least half as active we return ``None`` (ambiguous → don't guess),
+        so a mis-attributed quarantine stays unlikely.
+        """
+        counts: Dict[int, int] = {}
+        for other in self.engine.recent_signals(limit=500):
+            p = self._extract_pid(other)
+            if not p or p == self._own_pid:
+                continue
+            if (other.name in ENCRYPTION_SIGNAL_NAMES
+                    or other.detector in ("minifilter", "mass_io")):
+                counts[p] = counts.get(p, 0) + 1
+        if not counts:
+            return None
+        ranked = sorted(counts.items(), key=lambda kv: kv[1], reverse=True)
+        top_pid, top_n = ranked[0]
+        if len(ranked) > 1 and ranked[1][1] * 2 >= top_n:
+            return None  # ambiguous — two pids comparably active
+        return top_pid
+
     # ---------------------------------------------------- core kill logic
 
-    def _respond_to_pid(self, pid: int, reason: str) -> KillAction:
+    def _respond_to_pid(self, pid: int, reason: str,
+                        *, cap_quarantine: bool = False) -> KillAction:
         if pid == self._own_pid:
             return self._noop(pid, reason, "refusing to kill self")
 
@@ -234,6 +278,13 @@ class ProcessResponder:
             return self._noop(pid, reason,
                               f"{proc_name!r} is on the never-kill list")
 
+        # When the pid was *inferred* (correlated from a pid-less signal) we
+        # downgrade KILL → QUARANTINE: block the process but don't terminate
+        # something we only guessed at.  OFF stays OFF.
+        eff_mode = self.mode
+        if cap_quarantine and eff_mode == ResponderMode.KILL:
+            eff_mode = ResponderMode.QUARANTINE
+
         with self._lock:
             already_killed = pid in self._already_killed
             already_quar   = pid in self._already_quarantined
@@ -242,9 +293,9 @@ class ProcessResponder:
         terminated  = already_killed
         error: Optional[str] = None
 
-        if self.mode == ResponderMode.OFF:
+        if eff_mode == ResponderMode.OFF:
             action = KillAction(time.time(), pid, proc_name, cmdline, reason,
-                                self.mode.value, quarantined=False,
+                                eff_mode.value, quarantined=False,
                                 terminated=False,
                                 error="responder mode = off")
             return self._record(action)
@@ -259,7 +310,7 @@ class ProcessResponder:
                 with self._lock:
                     self._already_quarantined.add(pid)
 
-        if self.mode == ResponderMode.KILL and not already_killed:
+        if eff_mode == ResponderMode.KILL and not already_killed:
             ok, err = self._terminate(pid)
             terminated = ok
             if not ok:
@@ -269,7 +320,7 @@ class ProcessResponder:
                     self._already_killed.add(pid)
 
         action = KillAction(time.time(), pid, proc_name, cmdline, reason,
-                            self.mode.value, quarantined=quarantined,
+                            eff_mode.value, quarantined=quarantined,
                             terminated=terminated, error=error)
         return self._record(action)
 
