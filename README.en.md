@@ -225,6 +225,14 @@ Get-MpComputerStatus | Select-Object RealTimeProtectionEnabled, IsTamperProtecte
 #   items" or MpCmdRun.exe -Restore -ListAll.)
 
 # (b) Extract the sample *outside* the watch dir (e.g. C:\sample), then run it.
+#     ⚠ Do NOT use Windows Explorer for password-protected zips. Modern
+#        password archives are AES-encrypted, which Explorer can't decrypt — it
+#        gives no password prompt and leaves an "empty folder" (even for a .zip).
+#        Use 7-Zip:
+#        winget install -e --id 7zip.7zip   # if not installed
+& 'C:\Program Files\7-Zip\7z.exe' x 'C:\sample.zip' -o'C:\sample' -p<password>
+#   No space after -o / -p. A "CRC failed"/"Data error" means the archive was
+#   truncated during download → re-download.
 ```
 
 > ⚠ Disabling Defender is **for the isolated VM only**; always revert the

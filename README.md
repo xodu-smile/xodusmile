@@ -231,6 +231,13 @@ Get-MpComputerStatus | Select-Object RealTimeProtectionEnabled, IsTamperProtecte
 #   "보안 기록 > 격리된 항목" 또는 MpCmdRun.exe -Restore -ListAll 로 복원 가능.)
 
 # (b) 검체를 watch dir *밖*(예: C:\sample)에 압축 해제 → 실행
+#     ⚠ 비밀번호가 걸린 zip 은 윈도우 탐색기로 풀지 마세요. 요즘 비번 압축은
+#        대부분 AES 암호화라 탐색기가 복호화하지 못하고 → 비번창도 안 뜨고
+#        "빈 폴더"가 됩니다(확장자가 .zip 이어도 동일). 7-Zip 으로 푸세요:
+#        winget install -e --id 7zip.7zip   # 미설치 시
+& 'C:\Program Files\7-Zip\7z.exe' x 'C:\sample.zip' -o'C:\sample' -p<비밀번호>
+#   -o / -p 와 값 사이에 공백 없음. "CRC failed"/"Data error" 가 나오면 압축
+#   파일이 다운로드 중 잘린 것 → 재다운로드.
 ```
 
 > ⚠ Defender 끄기는 **격리 VM 에서만**, 테스트 후 반드시 스냅샷 복원. 종료된
