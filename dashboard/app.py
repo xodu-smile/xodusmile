@@ -31,7 +31,13 @@ def create_app(agent):
 
     @app.route("/api/events")
     def api_events():
-        return jsonify({"events": agent.store.recent(100)})
+        # The dashboard "recent activity" panel reflects the *active* detection
+        # window (engine), not the permanent store, so it stays consistent with
+        # the threat score and clears when the operator resets it — instead of
+        # showing stale CRITICAL rows under an "all clear" score.  Newest first.
+        # The full audit trail still lives in the SQLite store + incident reports.
+        sigs = agent.engine.recent_signals(100)
+        return jsonify({"events": [s.to_dict() for s in reversed(sigs)]})
 
     @app.route("/api/processes")
     def api_processes():
