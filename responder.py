@@ -384,7 +384,19 @@ class ProcessResponder:
         action = KillAction(time.time(), pid, proc_name, cmdline, reason,
                             eff_mode.value, quarantined=quarantined,
                             terminated=terminated, error=error)
-        return self._record(action)
+        result = self._record(action)
+
+        # The culprit is dead — drop its signals from the live scoring window
+        # so the global threat level falls back to "안전" on its own once every
+        # active threat is neutralized, instead of staying RED until the
+        # operator hits the reset button.  Done *after* _record(): on_action
+        # builds the incident report from engine.recent_signals(), so the
+        # evidence must still be in the window at report time.  Other pids'
+        # signals — and the permanent audit trail — are untouched.
+        if result.terminated:
+            self.engine.forget_pid(pid)
+
+        return result
 
     def _noop(self, pid: int, reason: str, why: str) -> KillAction:
         action = KillAction(time.time(), pid, "", "", reason,

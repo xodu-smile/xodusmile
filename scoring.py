@@ -161,6 +161,28 @@ class ScoringEngine:
         with self._lock:
             self._signals.clear()
 
+    def forget_pid(self, pid: int) -> int:
+        """라이브 점수 윈도우에서 ``pid`` 에 귀속된 시그널을 모두 제거한다.
+
+        responder 가 해당 PID 를 *종료(terminate)* 한 직후 호출된다 — 그
+        프로세스가 가하던 위협은 끝났으므로, 직전 윈도우에 쌓인 그 PID 의
+        신호가 *라이브* 위협 점수를 계속 부풀리면 안 된다.  이렇게 해야
+        모든 활성 위협이 제거됐을 때 대시보드가 운영자의 수동 초기화 없이도
+        스스로 "안전" 으로 복귀한다.
+
+        다른 PID(아직 활동 중인 제2의 공격자)의 신호는 건드리지 않으므로
+        동시 다발 공격은 점수를 그대로 유지한다.  PID 가 없는 시그널(예:
+        canary)은 귀속이 불가능하므로 남으며, 재발생이 없으면 윈도우에서
+        자연 감쇠한다.  영구 감사 기록(SQLite store, 인시던트 리포트,
+        responder 액션 로그)은 영향받지 않는다 — 여기서는 인메모리 scoring
+        deque 만 정리한다.  제거한 시그널 개수를 반환.
+        """
+        with self._lock:
+            kept = deque(s for s in self._signals if self._pid_of(s) != pid)
+            removed = len(self._signals) - len(kept)
+            self._signals = kept
+            return removed
+
     # ---- internals ----
 
     def _evict_old(self) -> None:
