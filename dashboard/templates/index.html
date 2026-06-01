@@ -778,6 +778,11 @@
         <a href="${href}" target="_blank">open report</a>
       </div>`;
     toastStack.appendChild(div);
+    // Cap visible toasts: during an incident storm we'd otherwise stack an
+    // unbounded wall of popups that buries the UI. Evict the oldest.
+    while (toastStack.children.length > 5) {
+      toastStack.firstChild.remove();
+    }
     setTimeout(() => {
       div.classList.add('leaving');
       setTimeout(() => div.remove(), 320);
@@ -798,11 +803,20 @@
         reports.forEach(r => seenReports.add(r.filename));
         firstReportTick = false;
       } else {
+        // Collect what's new this tick, then toast at most a handful so a
+        // burst of incidents can't flood the screen in a single pass.
+        const fresh = [];
         for (const r of reports.slice().reverse()) {
           if (!seenReports.has(r.filename)) {
             seenReports.add(r.filename);
-            spawnToast(r);
+            fresh.push(r);
           }
+        }
+        const shown = fresh.slice(0, 3);
+        shown.forEach(spawnToast);
+        if (fresh.length > shown.length) {
+          console.warn(`${fresh.length - shown.length} more incident(s) `
+                     + `this tick — see the reports panel`);
         }
       }
     } catch (e) { /* silent */ }

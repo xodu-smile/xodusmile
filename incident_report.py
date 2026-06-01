@@ -28,11 +28,32 @@ import shutil
 import subprocess
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass, asdict
 from pathlib import Path
-from typing import List, Optional
+from typing import Deque, Dict, List, Optional
 
 from scoring import ScoringEngine, Signal
+
+# Native desktop notifications are *best effort* and purely advisory: the
+# authoritative record is the markdown report + the dashboard.  When an
+# incident storm hits (e.g. ransomware fanning out, or a browser spawning
+# dozens of child processes the moment the operator opens the dashboard),
+# firing one native popup per incident floods the screen and — with the
+# blocking fallbacks — can wedge the desktop.  So we cap how many native
+# popups we raise per rolling window; anything beyond the cap is still
+# written to disk and surfaced in the dashboard, just not popped natively.
+_NOTIFY_MAX_PER_WINDOW = 3
+_NOTIFY_WINDOW_SECS = 30.0
+
+# Reports are deduped per (pid, terminated, quarantined) state, but only for
+# a rolling window — not forever.  A time window (rather than a permanent set)
+# matters for live operation: it bounds memory on a long-running agent, lets a
+# *persistent* attacker re-alert if it's still tripping after the window, and
+# avoids permanently muzzling a reused PID or one the operator manually
+# released and which later re-offends.
+_REPORT_DEDUP_SECS = 60.0
+_REPORT_DEDUP_MAX = 2048  # hard cap on tracked states; prune when exceeded
 
 
 @dataclass
@@ -62,6 +83,16 @@ class IncidentReporter:
         self.notify = notify
         self._lock = threading.Lock()
         self._records: List[IncidentRecord] = []
+        # (pid, terminated, quarantined) -> last time we reported that state.
+        # A pid that keeps tripping the same detector (very common with the
+        # kernel minifilter on — it re-flags the encrypting pid on every file
+        # op) is deduped within a rolling window so it doesn't spawn a fresh
+        # report + popup each time.  A genuine escalation (quarantine → later
+        # kill) is a different tuple and is still reported immediately.
+        self._reported_states: Dict[tuple, float] = {}
+        # Rolling timestamps of native popups we've raised, for rate limiting.
+        self._notify_window: Deque[float] = deque()
+        self._notify_lock = threading.Lock()
 
     # -------------------------------------------------------------- callback
 
@@ -72,6 +103,25 @@ class IncidentReporter:
         # both flags False and carry an error string explaining why.
         if not (action.terminated or action.quarantined):
             return
+
+        # Suppress duplicate reports for a pid we've already reported in this
+        # exact state within the dedup window.  Repeated identical signals for
+        # the same pid (the norm under the kernel minifilter) otherwise pile up
+        # reports + popups even though nothing new happened to the process.
+        state = (action.pid, bool(action.terminated), bool(action.quarantined))
+        now = time.time()
+        with self._lock:
+            last = self._reported_states.get(state)
+            if last is not None and (now - last) < _REPORT_DEDUP_SECS:
+                return
+            self._reported_states[state] = now
+            # Bound memory: when the map grows too large, drop entries whose
+            # window has fully elapsed (they can only ever re-report anyway).
+            if len(self._reported_states) > _REPORT_DEDUP_MAX:
+                cutoff = now - _REPORT_DEDUP_SECS
+                self._reported_states = {
+                    k: v for k, v in self._reported_states.items() if v >= cutoff
+                }
 
         content = self._build_markdown(action)
         path = self._write_file(content, action)
@@ -93,7 +143,7 @@ class IncidentReporter:
 
         print(f"[reporter] incident report written: {path}")
 
-        if self.notify:
+        if self.notify and self._notify_rate_ok():
             t = threading.Thread(
                 target=self._notify_user,
                 args=(action, path),
@@ -239,6 +289,28 @@ class IncidentReporter:
 
     # ---------------------------------------------- desktop notifications
 
+    def _notify_rate_ok(self) -> bool:
+        """True if we're under the native-popup budget for the window.
+
+        Prevents an incident storm from flooding the desktop with popups
+        (and, with blocking fallbacks, wedging it).  Suppressed popups are
+        still recorded on disk and shown in the dashboard.
+        """
+        now = time.time()
+        with self._notify_lock:
+            cutoff = now - _NOTIFY_WINDOW_SECS
+            while self._notify_window and self._notify_window[0] < cutoff:
+                self._notify_window.popleft()
+            if len(self._notify_window) >= _NOTIFY_MAX_PER_WINDOW:
+                if len(self._notify_window) == _NOTIFY_MAX_PER_WINDOW:
+                    # Log the throttle exactly once per saturated window.
+                    print("[reporter] notification rate limit hit; "
+                          "suppressing native popups (reports still written)")
+                    self._notify_window.append(now)  # mark as logged
+                return False
+            self._notify_window.append(now)
+            return True
+
     def _notify_user(self, action, path: Path) -> None:
         verb = "Killed" if action.terminated else "Quarantined"
         title = (f"RansomGuard: {verb} {action.process_name or '?'} "
@@ -305,16 +377,12 @@ class IncidentReporter:
                 return
         except Exception:
             pass
-        # Last resort: modal MessageBox so the user still sees it.
-        try:
-            import ctypes
-            MB_SYSTEMMODAL = 0x1000
-            MB_ICONWARNING = 0x30
-            ctypes.windll.user32.MessageBoxW(  # type: ignore[attr-defined]
-                0, body, title, MB_SYSTEMMODAL | MB_ICONWARNING,
-            )
-        except Exception:
-            print(f"\a[NOTIFY] {title}\n         {body}")
+        # Last resort: a non-blocking console line + bell.  We deliberately
+        # do NOT pop a modal MessageBox here: a system-modal dialog steals
+        # global input focus, and one per incident stacks into an
+        # unclosable wall that wedges the desktop during an incident storm.
+        # The report file and the dashboard remain the durable record.
+        print(f"\a[NOTIFY] {title}\n         {body}")
 
     @staticmethod
     def _psq(s: str) -> str:
