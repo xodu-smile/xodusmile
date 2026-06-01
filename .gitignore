@@ -20,6 +20,7 @@ __pycache__/
 *.db-journal
 reports/
 testsign_result.txt
+.lab.json          # lab.ps1 로컬 설정 (watch 경로 등) — 머신마다 다름
 
 # ── 커널 드라이버 빌드 산출물 (아키텍처 고유 — 로컬 빌드할 것) ──────
 #  build/x64/... 와 build/ARM64/... 의 .sys/.cat 은 서로 호환되지 않음.

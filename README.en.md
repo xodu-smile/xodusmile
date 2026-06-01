@@ -178,6 +178,29 @@ exercised through `ProcessCmdlineDetector.submit_external`.
 > sample encrypts the whole system beyond the watch dir and can leave the
 > VM unbootable.
 
+### Quick run — `scripts\lab.ps1`
+
+Instead of typing every command below, an orchestrator wraps the flow into
+short subcommands. Register the watch dir **once**; later phases reuse it.
+The safety gates stay in place — **you take the snapshot and launch the
+sample yourself**, and `detonate` only disables Defender + extracts the
+archive (it never runs the sample).
+
+```powershell
+.\scripts\lab.ps1 set -WatchDir C:\Users\you\Documents  # register watch dir once
+.\scripts\lab.ps1 driver        # (optional) build+install+verify driver, after testsigning reboot
+.\scripts\lab.ps1 run           # start the agent (e.g. lab.ps1 run --no-minifilter)
+.\scripts\lab.ps1 preflight     # GO/NO-GO check + decoys (-Count default 500)
+#   --> take the VM snapshot here (manually) <--
+.\scripts\lab.ps1 detonate -SampleZip C:\in\s.zip -Password infected -OutDir C:\sample
+#   --> extract only; verify snapshot, then launch the sample yourself <--
+.\scripts\lab.ps1 postmortem    # score -> postmortem.md
+#   --> restore the snapshot <--
+.\scripts\lab.ps1 help          # full flow / current watch dir
+```
+
+The detailed steps below explain what each phase does.
+
 Two helpers bracket the detonation.
 
 **Before — readiness check (`scripts/lab_preflight.ps1`)**

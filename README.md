@@ -175,6 +175,28 @@ cmdline 룰은 `ProcessCmdlineDetector.submit_external` 을 통해 가짜 이벤
 **VM 게스트의 관리자 PowerShell** 에서 실행합니다. 검체는 직접 준비하세요(이
 프로젝트는 검체를 배포하지 않습니다).
 
+### 빠른 실행 — `scripts\lab.ps1`
+
+아래 8단계 명령을 일일이 칠 필요 없이 오케스트레이터로 묶어 실행할 수 있습니다.
+**watch 경로는 한 번만 등록**하면 이후 단계에서 재입력하지 않습니다. 안전
+게이트는 그대로입니다 — **스냅샷 촬영과 검체 실행은 사람이 직접** 하고, `detonate`
+는 Defender 비켜주기 + 압축 해제까지만 합니다(검체를 자동 실행하지 않음).
+
+```powershell
+.\scripts\lab.ps1 set -WatchDir C:\Users\you\Documents  # 0) 경로 한 번만 등록
+.\scripts\lab.ps1 driver        # 2) (선택) testsigning 재부팅 후 드라이버 빌드+설치+확인
+.\scripts\lab.ps1 run           # 3) 에이전트 실행 (필요시: lab.ps1 run --no-minifilter)
+.\scripts\lab.ps1 preflight     # 4) GO/NO-GO 점검 + 디코이 배치 (-Count 기본 500)
+#   --> 5) 여기서 VM 스냅샷을 직접 찍습니다 <--
+.\scripts\lab.ps1 detonate -SampleZip C:\in\s.zip -Password infected -OutDir C:\sample
+#   --> 6) 압축 해제까지만. 스냅샷 확인 후 검체를 직접 실행 <--
+.\scripts\lab.ps1 postmortem    # 7) 성적 집계 -> postmortem.md
+#   --> 8) 스냅샷 복원 <--
+.\scripts\lab.ps1 help          # 전체 흐름 / 현재 watch 경로 확인
+```
+
+각 단계가 실제로 무엇을 하는지는 아래 상세 설명을 참고하세요.
+
 **0) 준비** — 스냅샷 가능한 일회용 Windows 11 VM, `.\scripts\bootstrap.ps1` 로
 사용자 모드 설치(커널 차단까지 볼 거면 WDK/VS Build Tools 도 — `설치` 섹션 참고).
 
