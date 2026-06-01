@@ -188,8 +188,7 @@ cmdline 룰은 `ProcessCmdlineDetector.submit_external` 을 통해 가짜 이벤
 .\scripts\lab.ps1 run           # 3) 에이전트 실행 (필요시: lab.ps1 run --no-minifilter)
 .\scripts\lab.ps1 preflight     # 4) GO/NO-GO 점검 + 디코이 배치 (-Count 기본 500)
 #   --> 5) 여기서 VM 스냅샷을 직접 찍습니다 <--
-.\scripts\lab.ps1 detonate -SampleZip C:\in\s.zip -Password infected -OutDir C:\sample
-#   --> 6) 압축 해제까지만. 스냅샷 확인 후 검체를 직접 실행 <--
+#   --> 6) 압축 해제하고 스냅샷 확인 후 검체를 직접 실행 <--
 .\scripts\lab.ps1 postmortem    # 7) 성적 집계 -> postmortem.md
 #   --> 8) 스냅샷 복원 <--
 .\scripts\lab.ps1 help          # 전체 흐름 / 현재 watch 경로 확인
