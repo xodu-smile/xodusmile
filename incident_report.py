@@ -55,6 +55,14 @@ _NOTIFY_WINDOW_SECS = 30.0
 _REPORT_DEDUP_SECS = 60.0
 _REPORT_DEDUP_MAX = 2048  # hard cap on tracked states; prune when exceeded
 
+# Spawning a console subprocess (e.g. powershell for a BurntToast popup) from a
+# context that has no inherited console makes Windows allocate — and instantly
+# tear down — a console window.  It flashes as a brief black rectangle, and a
+# burst of notifications reads as the screen "blinking"/lagging right when an
+# incident fires.  CREATE_NO_WINDOW suppresses it.  The attribute is Windows-
+# only; on POSIX getattr falls back to 0, a valid no-op creationflags value.
+_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
 # ---- 비전공자용 한글 표기 ------------------------------------------------
 # 보고서는 운영자(주로 비전공자)가 바로 이해할 수 있게 한국어 + 평이한 설명
 # 으로 작성한다.  기술 상세(신호 표, 원시 JSON)는 하단 "기술 상세" 섹션에
@@ -449,7 +457,7 @@ class IncidentReporter:
             subprocess.run(
                 ["notify-send", "-u", "critical",
                  "-i", "dialog-warning", title, body],
-                timeout=5, check=False,
+                timeout=5, check=False, creationflags=_NO_WINDOW,
             )
             return
         print(f"\a[NOTIFY] {title}\n         {body}")
@@ -462,7 +470,7 @@ class IncidentReporter:
             subprocess.run(
                 ["osascript", "-e",
                  f'display notification "{b}" with title "{t}"'],
-                timeout=5, check=False,
+                timeout=5, check=False, creationflags=_NO_WINDOW,
             )
             return
         print(f"\a[NOTIFY] {title}\n         {body}")
@@ -485,7 +493,7 @@ class IncidentReporter:
             )
             r = subprocess.run(
                 ["powershell", "-NoProfile", "-Command", ps],
-                timeout=6, capture_output=True,
+                timeout=6, capture_output=True, creationflags=_NO_WINDOW,
             )
             if r.returncode == 0:
                 return

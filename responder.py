@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import os
 import platform
+import queue
 import threading
 import time
 from dataclasses import dataclass, field, asdict
@@ -151,11 +152,72 @@ class ProcessResponder:
         self._already_quarantined: Set[int] = set()
         self._own_pid = os.getpid()
 
+        # Active response runs on a dedicated worker thread, NOT inline on
+        # the detector/kernel-bridge callback thread.  Terminating a process
+        # (psutil.kill + up-to-2s confirmation) and writing the markdown
+        # incident report to disk are slow; doing them inside the
+        # ScoringEngine.submit() -> listener call would stall the kernel
+        # FilterGetMessage pump that fed the signal.  Kernel events then back
+        # up and the desktop lags exactly when ransomware is fanning out.
+        # We make the dispatch decision inline (cheap deque scans) and hand
+        # the blocking work to the worker.
+        self._queue: "queue.Queue[Optional[tuple]]" = queue.Queue()
+        self._inflight: Set[int] = set()
+        self._worker: Optional[threading.Thread] = None
+
     # ---------------------------------------------------------- public API
 
     def attach(self) -> None:
         """Subscribe to the scoring engine.  Idempotent."""
+        self._ensure_worker()
         self.engine.subscribe(self._dispatch)
+
+    def _ensure_worker(self) -> None:
+        with self._lock:
+            if self._worker is not None and self._worker.is_alive():
+                return
+            self._worker = threading.Thread(
+                target=self._worker_loop,
+                name="responder-worker",
+                daemon=True,
+            )
+            self._worker.start()
+
+    def _worker_loop(self) -> None:
+        while True:
+            job = self._queue.get()
+            try:
+                if job is None:        # sentinel: shut the worker down
+                    return
+                pid, reason, cap = job
+                try:
+                    self._respond_to_pid(pid, reason, cap_quarantine=cap)
+                except Exception as e:
+                    print(f"[responder] worker error on pid={pid}: {e}")
+                finally:
+                    with self._lock:
+                        self._inflight.discard(pid)
+            finally:
+                self._queue.task_done()
+
+    def _enqueue(self, pid: int, reason: str,
+                 *, cap_quarantine: bool = False) -> None:
+        """Queue an action for the worker, skipping work already done.
+
+        Under the kernel minifilter the same pid is re-flagged on *every*
+        file op, so the naive path would enqueue (and psutil-look-up, and
+        report) hundreds of times for one process.  We drop anything that
+        is already in flight or has already reached its terminal state.
+        """
+        with self._lock:
+            if pid in self._inflight:
+                return
+            if pid in self._already_killed:
+                return  # terminal — nothing left to do for this pid
+            if cap_quarantine and pid in self._already_quarantined:
+                return  # correlated quarantine already applied
+            self._inflight.add(pid)
+        self._queue.put((pid, reason, cap_quarantine))
 
     def actions(self, limit: int = 50) -> List[dict]:
         with self._lock:
@@ -195,14 +257,14 @@ class ProcessResponder:
             if sig.name in ENCRYPTION_SIGNAL_NAMES:
                 culprit = self._correlate_pid(sig)
                 if culprit is not None:
-                    self._respond_to_pid(culprit, f"{reason} [correlated]",
-                                         cap_quarantine=True)
+                    self._enqueue(culprit, f"{reason} [correlated]",
+                                  cap_quarantine=True)
                 else:
                     self._record_observed(0, f"{reason} [no pid to attribute]")
             return
 
         if self._is_confident(pid, sig):
-            self._respond_to_pid(pid, reason)
+            self._enqueue(pid, reason)
         else:
             # Suspicious but uncorroborated — log intent, take no action.
             # The dashboard still shows it so an operator can judge.
