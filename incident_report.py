@@ -55,6 +55,12 @@ _NOTIFY_WINDOW_SECS = 30.0
 _REPORT_DEDUP_SECS = 60.0
 _REPORT_DEDUP_MAX = 2048  # hard cap on tracked states; prune when exceeded
 
+# 통합(campaign) 보고서: 마지막 인시던트로부터 이 시간 안에 발생한 새 인시던트는
+# *같은 공격*으로 간주해 한 건으로 묶는다.  점수 채점 윈도우(120초)와 맞춰,
+# 부모 프로세스가 띄운 자식들(vssadmin/cmd 등)이 한 사건으로 통합되게 한다.
+_CAMPAIGN_GAP_SECS = 120.0
+_CAMPAIGN_MAX = 200  # 추적할 campaign 최대 개수 (오래된 것부터 정리)
+
 # Spawning a console subprocess (e.g. powershell for a BurntToast popup) from a
 # context that has no inherited console makes Windows allocate — and instantly
 # tear down — a console window.  It flashes as a brief black rectangle, and a
@@ -146,6 +152,112 @@ def _signame_from_reason(reason: Optional[str]) -> str:
     return sig.split()[0] if sig else ""
 
 
+# ---- 피해 범위 추정 ------------------------------------------------------
+# 차단 시점에 "이 프로세스가 실제로 무슨 파일을 건드렸나"를 보고서에 바로
+# 넣기 위한 집계.  디스크를 새로 스캔하지 않고, 이미 들어온 신호의 metadata
+# 에서 파일 경로를 모아 분류한다 — 따라서 *관측된 최소 추정치*이며, 정확한
+# 디스크 단위 집계는 postmortem.py(디코이 기준)가 담당한다.
+_PATH_KEYS = ("path", "dest", "src", "last_path", "new_path", "old_path", "target")
+
+# 신호 이름 -> 피해 분류
+_DMG_ENCRYPT = frozenset({
+    "high_entropy_write", "magic_bytes_lost", "modify_burst",
+    "kernel_write_burst", "process_write_burst", "canary_modified",
+})
+_DMG_RENAME = frozenset({"suspicious_extension", "kernel_rename_burst"})
+_DMG_DELETE = frozenset({"file_delete", "canary_deleted"})
+
+
+def _sig_paths(sig: "Signal") -> List[str]:
+    meta = sig.metadata or {}
+    out: List[str] = []
+    for k in _PATH_KEYS:
+        v = meta.get(k)
+        if isinstance(v, str) and v:
+            out.append(v)
+    return out
+
+
+def summarize_damage(signals: List["Signal"]) -> dict:
+    """신호 목록에서 영향받은 파일을 분류 집계한다."""
+    enc: set = set()
+    ren: set = set()
+    dele: set = set()
+    max_modify_burst = 0
+    max_rename_burst = 0
+    max_write_bytes = 0
+    canary = False
+    for s in signals:
+        name = s.name
+        meta = s.metadata or {}
+        paths = _sig_paths(s)
+        if name in _DMG_ENCRYPT:
+            enc.update(paths)
+            if name == "modify_burst":
+                max_modify_burst = max(max_modify_burst, int(meta.get("count", 0) or 0))
+            elif name == "kernel_write_burst":
+                max_write_bytes = max(max_write_bytes, int(meta.get("bytes", 0) or 0))
+            elif name == "canary_modified":
+                canary = True
+        elif name in _DMG_RENAME:
+            ren.update(paths)
+            if name == "kernel_rename_burst":
+                max_rename_burst = max(max_rename_burst, int(meta.get("count", 0) or 0))
+        elif name in _DMG_DELETE:
+            dele.update(paths)
+            if name == "canary_deleted":
+                canary = True
+    distinct = enc | ren | dele
+    return {
+        "encrypted": enc,
+        "renamed": ren,
+        "deleted": dele,
+        "distinct_total": len(distinct),
+        "max_modify_burst": max_modify_burst,
+        "max_rename_burst": max_rename_burst,
+        "max_write_bytes": max_write_bytes,
+        "canary": canary,
+    }
+
+
+def _damage_headline(d: dict) -> str:
+    """한 줄 요약 (한눈에 보기 / campaign 헤더용)."""
+    return (f"변조/암호화 {len(d['encrypted'])}개 · 이름변경 {len(d['renamed'])}개 "
+            f"· 삭제 {len(d['deleted'])}개 (고유 합계 {d['distinct_total']}개)")
+
+
+def _damage_lines(d: dict) -> List[str]:
+    lines: List[str] = []
+    lines.append(f"- **변조/암호화 정황 파일:** {len(d['encrypted'])}개")
+    lines.append(f"- **이름이 바뀐 파일:** {len(d['renamed'])}개")
+    lines.append(f"- **삭제된 파일:** {len(d['deleted'])}개")
+    lines.append(f"- **영향받은 고유 파일(합계):** {d['distinct_total']}개")
+    intensity: List[str] = []
+    if d["max_modify_burst"]:
+        intensity.append(f"한 번에 최대 {d['max_modify_burst']}개 동시 변경")
+    if d["max_rename_burst"]:
+        intensity.append(f"한 번에 최대 {d['max_rename_burst']}개 동시 이름변경")
+    if d["max_write_bytes"]:
+        intensity.append(f"관측된 최대 쓰기량 {d['max_write_bytes'] / (1024 * 1024):.1f} MB")
+    if intensity:
+        lines.append("- **활동 강도:** " + ", ".join(intensity))
+    if d["canary"]:
+        lines.append("- **미끼(canary) 파일 침해:** 예 — 무차별 암호화가 "
+                     "진행 중이었다는 강한 정황입니다.")
+    samples = (list(d["encrypted"])[:5]
+               + list(d["renamed"])[:5]
+               + list(d["deleted"])[:5])[:8]
+    if samples:
+        lines.append("- **영향받은 파일 예시:**")
+        for p in samples:
+            lines.append(f"  - `{p}`")
+    lines.append("")
+    lines.append("> 이 수치는 탐지기가 **관측한 신호 기준의 최소 추정치**입니다. "
+                 "차단 직전 짧은 순간의 일부 작업은 누락될 수 있고, 디스크 단위의 "
+                 "정확한 피해 집계는 `postmortem.py`(디코이 기준)를 참고하세요.")
+    return lines
+
+
 @dataclass
 class IncidentRecord:
     timestamp: float
@@ -156,9 +268,20 @@ class IncidentRecord:
     quarantined: bool
     filename: str
     path: str
+    kind: str = "incident"
 
     def to_dict(self) -> dict:
         return asdict(self)
+
+
+@dataclass
+class _Campaign:
+    """시간 윈도우로 묶인 하나의 공격 사건 (여러 PID를 한 건으로 통합)."""
+    start_ts: float
+    last_ts: float
+    filename: str
+    pids: set
+    members: List[dict]   # {ts, pid, name, reason, terminated, quarantined, incident_file}
 
 
 class IncidentReporter:
@@ -183,6 +306,8 @@ class IncidentReporter:
         # Rolling timestamps of native popups we've raised, for rate limiting.
         self._notify_window: Deque[float] = deque()
         self._notify_lock = threading.Lock()
+        # 통합(campaign) 보고서 상태.  on_action 에서 시간 윈도우로 묶는다.
+        self._campaigns: List[_Campaign] = []
 
     # -------------------------------------------------------------- callback
 
@@ -233,6 +358,12 @@ class IncidentReporter:
 
         print(f"[reporter] incident report written: {path}")
 
+        # 이 인시던트를 진행 중인 공격(campaign)에 합치고 통합 보고서를 갱신.
+        try:
+            self._update_campaign(action, path)
+        except Exception as e:  # 통합 보고서 실패가 핵심 대응을 막으면 안 됨
+            print(f"[reporter] campaign update failed: {e}")
+
         if self.notify and self._notify_rate_ok():
             t = threading.Thread(
                 target=self._notify_user,
@@ -245,7 +376,33 @@ class IncidentReporter:
 
     def recent(self, limit: int = 50) -> List[dict]:
         with self._lock:
-            return [r.to_dict() for r in reversed(self._records[-limit:])]
+            items = [r.to_dict() for r in self._records]
+            # 2개 이상 프로세스를 묶은 공격만 통합 항목으로 노출한다.  단일
+            # 프로세스 공격은 개별 인시던트만으로 충분히 설명되므로 중복 노출
+            # 하지 않는다(목록이 시끄러워지는 것을 방지).
+            for c in self._campaigns:
+                if len(c.pids) >= 2:
+                    items.append(self._campaign_record(c))
+        items.sort(key=lambda d: d.get("timestamp", 0), reverse=True)
+        return items[:limit]
+
+    def _campaign_record(self, c: _Campaign) -> dict:
+        lead = c.members[0] if c.members else {}
+        lead_name = lead.get("name") or "알 수 없음"
+        n = len(c.pids)
+        terminated = any(m.get("terminated") for m in c.members)
+        quarantined = any(m.get("quarantined") for m in c.members)
+        return {
+            "timestamp": c.last_ts,
+            "pid": lead.get("pid", 0),
+            "process_name": f"🛡 통합 사건 — {lead_name} 외 {n - 1}개 프로세스",
+            "reason": f"campaign/{n}_processes",
+            "terminated": terminated,
+            "quarantined": quarantined,
+            "filename": c.filename,
+            "path": str(self.reports_dir / c.filename),
+            "kind": "campaign",
+        }
 
     def read_report(self, filename: str) -> Optional[str]:
         # Defence-in-depth: only allow plain filenames inside reports_dir.
@@ -273,6 +430,7 @@ class IncidentReporter:
         recent = self.engine.recent_signals(limit=200)
 
         pid_signals = [s for s in recent if self._signal_pid(s) == action.pid]
+        damage = summarize_damage(pid_signals)
 
         proc_name = action.process_name or "알 수 없음"
         cmd = action.cmdline or "(확인 불가)"
@@ -307,6 +465,7 @@ class IncidentReporter:
         lines.append(f"- **무슨 일이 있었나요?** {what}")
         lines.append(f"- **무엇을 했나요?** {did}")
         lines.append(f"- **지금 안전한가요?** {safe}")
+        lines.append(f"- **추정 피해 규모:** {_damage_headline(damage)}")
         lines.append("- **무엇을 하면 되나요?** "
                      f"이 프로그램(`{proc_name}`)을 직접 실행한 적이 없다면, 최근 내려받은 "
                      "파일이나 설치한 프로그램을 점검하고 중요한 자료의 백업 상태를 "
@@ -338,6 +497,11 @@ class IncidentReporter:
         lines.append("")
         lines.append(f"- **현재 위험 점수(최근 120초 누적):** {score} (150 이상이면 자동 차단)")
         lines.append(f"- **판정된 위협 수준:** **{_ko_severity(level)}** ({level})")
+        lines.append("")
+
+        lines.append("## 피해 범위 (이 프로그램이 건드린 파일)")
+        lines.append("")
+        lines.extend(_damage_lines(damage))
         lines.append("")
 
         # ---- 자세한 정보 (전문/포렌식용) ----
@@ -408,6 +572,114 @@ class IncidentReporter:
         path = self.reports_dir / fname
         path.write_text(content, encoding="utf-8")
         return path
+
+    # ------------------------------------------------------- campaign rollup
+
+    def _update_campaign(self, action, incident_path: Path) -> None:
+        """이 인시던트를 진행 중 공격에 합치고 통합 보고서를 갱신한다."""
+        ts = action.timestamp
+        member = {
+            "ts": ts,
+            "pid": action.pid,
+            "name": action.process_name or "알 수 없음",
+            "reason": action.reason or "",
+            "terminated": bool(action.terminated),
+            "quarantined": bool(action.quarantined),
+            "incident_file": incident_path.name,
+        }
+        with self._lock:
+            camp = None
+            if self._campaigns:
+                last = self._campaigns[-1]
+                if ts - last.last_ts <= _CAMPAIGN_GAP_SECS:
+                    camp = last
+            if camp is None:
+                fname = ("campaign_"
+                         + time.strftime("%Y%m%d_%H%M%S", time.localtime(ts))
+                         + ".md")
+                camp = _Campaign(start_ts=ts, last_ts=ts, filename=fname,
+                                 pids=set(), members=[])
+                self._campaigns.append(camp)
+                if len(self._campaigns) > _CAMPAIGN_MAX:
+                    self._campaigns = self._campaigns[-_CAMPAIGN_MAX:]
+            camp.last_ts = max(camp.last_ts, ts)
+            camp.pids.add(action.pid)
+            camp.members.append(member)
+            # 락을 들고 디스크 I/O·엔진 호출을 하지 않도록 스냅샷만 떠서 나간다.
+            snap = _Campaign(start_ts=camp.start_ts, last_ts=camp.last_ts,
+                             filename=camp.filename, pids=set(camp.pids),
+                             members=list(camp.members))
+        content = self._build_campaign_markdown(snap)
+        (self.reports_dir / snap.filename).write_text(content, encoding="utf-8")
+
+    def _build_campaign_markdown(self, camp: _Campaign) -> str:
+        start_local = time.strftime("%Y-%m-%d %H:%M:%S %Z",
+                                    time.localtime(camp.start_ts))
+        last_local = time.strftime("%H:%M:%S", time.localtime(camp.last_ts))
+
+        # 이 공격에 속한 모든 PID 의 신호를 모아 통합 피해를 집계한다.
+        recent = self.engine.recent_signals(limit=500)
+        camp_signals = [s for s in recent if self._signal_pid(s) in camp.pids]
+        damage = summarize_damage(camp_signals)
+
+        n_proc = len(camp.pids)
+        killed = sum(1 for m in camp.members if m["terminated"])
+        quar = sum(1 for m in camp.members if m["quarantined"])
+        reasons = [m["reason"] for m in camp.members if m["reason"]]
+        what = SIGNAL_KO.get(
+            _signame_from_reason(reasons[0] if reasons else ""),
+            "의심스러운 보안 위협 행위가 탐지되었습니다.")
+
+        L: List[str] = []
+        L.append(f"# 통합 위협 보고서 — 공격 사건 ({n_proc}개 프로세스)")
+        L.append("")
+        L.append(f"> RansomGuard 자동 탐지·대응 · {start_local} ~ {last_local}")
+        L.append("")
+
+        L.append("## 한눈에 보기")
+        L.append("")
+        L.append(f"- **무슨 공격이었나요?** {what}")
+        L.append("- **관련 프로세스:** "
+                 f"{n_proc}개 (PID {', '.join(str(p) for p in sorted(camp.pids))})")
+        L.append(f"- **무엇을 했나요?** 강제 종료 {killed}개 · 격리 {quar}개")
+        L.append(f"- **추정 피해 규모:** {_damage_headline(damage)}")
+        if damage["canary"]:
+            L.append("- **미끼(canary) 파일 침해:** 예 — 무차별 암호화 정황입니다.")
+        L.append("")
+
+        L.append("## 처리한 프로세스 목록")
+        L.append("")
+        L.append("| 시각 | PID | 프로세스 | 격리 | 종료 | 사유 | 개별 보고서 |")
+        L.append("|------|-----|----------|------|------|------|-------------|")
+        for m in sorted(camp.members, key=lambda x: x["ts"]):
+            t = time.strftime("%H:%M:%S", time.localtime(m["ts"]))
+            reason = (m["reason"] or "").replace("|", "\\|")
+            name = (m["name"] or "").replace("|", "\\|")
+            L.append(f"| {t} | {m['pid']} | `{name}` "
+                     f"| {'예' if m['quarantined'] else '·'} "
+                     f"| {'예' if m['terminated'] else '·'} "
+                     f"| {reason} "
+                     f"| [{m['incident_file']}]({m['incident_file']}) |")
+        L.append("")
+
+        L.append("## 통합 피해 범위")
+        L.append("")
+        L.extend(_damage_lines(damage))
+        L.append("")
+
+        if camp_signals:
+            L.append("## 통합 탐지 타임라인")
+            L.append("")
+            L.extend(self._signal_table(camp_signals[-40:]))
+            L.append("")
+
+        L.append("---")
+        L.append("")
+        L.append("> 같은 시간대(120초 이내 연쇄)에 처리된 프로세스들을 하나의 "
+                 "공격으로 묶은 통합 요약입니다. 프로세스별 상세·원본 JSON 은 위 "
+                 "표의 개별 보고서를 참고하세요.")
+        L.append("")
+        return "\n".join(L)
 
     # ---------------------------------------------- desktop notifications
 
