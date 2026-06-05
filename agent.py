@@ -99,10 +99,17 @@ class Agent:
             self.detectors.append(self.registry_kernel)
 
     def _on_signal(self, sig: Signal, score: int, level: Severity) -> None:
+        # Always persist every signal — INFO-level telemetry (benign OS/app
+        # housekeeping, score-0 correlation-gated deletes) is still valuable
+        # forensic data.  Only the *console* is quieted: INFO lines are pure
+        # noise on screen and never escalate, so skip printing them while
+        # keeping the full record in the store.  Detection is unchanged.
+        self.store.record(sig, score, level)
+        if level == Severity.INFO:
+            return
         bar = self._severity_bar(level)
         print(f"{bar} [{sig.detector}/{sig.name}] {sig.message}  "
               f"(weight={sig.weight}, total_score={score}, level={level.value})")
-        self.store.record(sig, score, level)
 
     @staticmethod
     def _severity_bar(level: Severity) -> str:
