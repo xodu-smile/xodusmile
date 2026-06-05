@@ -109,6 +109,41 @@ NEVER_KILL = {
 }
 
 
+# ---- 프로세스 위장(masquerade) 방어 -------------------------------------
+# never-kill 리스트는 *이름*만 본다.  랜섬웨어가 자기 실행 파일을
+# "svchost.exe" 같은 핵심 OS 프로세스 이름으로 위장하면 보호를 가로채
+# 차단을 회피한다.  방어책: 진짜 OS 핵심 프로세스는 *항상* 시스템 폴더에서
+# 실행된다는 점을 이용해, never-kill 이름이라도 실행 경로가 시스템 루트가
+# 아니면 "가짜(imposter)"로 보고 보호를 해제한다.
+_WINDIR = (os.environ.get("SystemRoot")
+           or os.environ.get("windir")
+           or r"C:\Windows").rstrip("\\")
+
+# 진짜 인스턴스가 반드시 이 아래에서 실행되는 경로들.  하나라도 prefix 가
+# 맞으면 정상 위치로 본다.  (소문자 비교)
+_SYSTEM_PROCESS_ROOTS = (
+    (_WINDIR + "\\system32\\").lower(),
+    (_WINDIR + "\\syswow64\\").lower(),
+    (_WINDIR + "\\winsxs\\").lower(),
+    (_WINDIR + "\\systemapps\\").lower(),   # 셸/스토어 호스트(SearchHost 등)
+    (_WINDIR + "\\").lower(),               # explorer.exe 등 Windows 직속
+)
+
+# 경로 검증이 *신뢰 가능한* never-kill 이름들.  진짜가 늘 시스템 폴더에서만
+# 도는 프로세스로 한정한다.  브라우저·개발도구·Defender 처럼 경로가 제각각인
+# 것은 제외(정상인데 가짜로 오판하면 안 됨) — 그쪽은 항상 "보호" 취급한다.
+_PATH_VERIFIED_NAMES = frozenset({
+    "smss.exe", "csrss.exe", "wininit.exe", "services.exe", "lsass.exe",
+    "winlogon.exe", "fontdrvhost.exe", "dwm.exe", "svchost.exe",
+    "spoolsv.exe", "audiodg.exe", "conhost.exe", "taskhostw.exe",
+    "runtimebroker.exe", "rundll32.exe", "regsvr32.exe", "dllhost.exe",
+    "sihost.exe", "ctfmon.exe", "dashost.exe", "wmiprvse.exe",
+    "trustedinstaller.exe", "tiworker.exe", "musnotification.exe",
+    "explorer.exe", "searchhost.exe", "shellexperiencehost.exe",
+    "startmenuexperiencehost.exe", "systemsettings.exe",
+})
+
+
 @dataclass
 class KillAction:
     timestamp: float
@@ -120,6 +155,23 @@ class KillAction:
     quarantined: bool
     terminated: bool
     error: Optional[str] = None
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+@dataclass
+class PendingDecision:
+    """never-kill 리스트에 걸린 프로세스가 악성으로 의심될 때, 운영자에게
+    '죽일지/살릴지' 묻기 위해 보류 중인 결정."""
+    timestamp: float
+    pid: int
+    process_name: str
+    cmdline: str
+    reason: str
+    image_path: str
+    quarantined: bool
+    status: str = "pending"   # pending | killed | spared | kill-failed
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -150,6 +202,8 @@ class ProcessResponder:
         self._actions: List[KillAction] = []
         self._already_killed: Set[int] = set()
         self._already_quarantined: Set[int] = set()
+        # never-kill 후보지만 악성 의심이라 운영자 결정을 기다리는 항목.
+        self._pending: Dict[int, PendingDecision] = {}
         self._own_pid = os.getpid()
 
         # Active response runs on a dedicated worker thread, NOT inline on
@@ -224,7 +278,11 @@ class ProcessResponder:
             return [a.to_dict() for a in self._actions[-limit:]]
 
     def manual_kill(self, pid: int, reason: str = "manual") -> KillAction:
-        return self._respond_to_pid(pid, reason)
+        # A manual kill is an explicit operator action, so it overrides the
+        # never-kill list (``force=True``).  The list is an *automatic*
+        # backstop against false positives — a human who deliberately clicks
+        # kill has already made the call.
+        return self._respond_to_pid(pid, reason, force=True)
 
     def manual_release(self, pid: int) -> bool:
         """Forget that we touched ``pid`` and remove the kernel block."""
@@ -234,6 +292,50 @@ class ProcessResponder:
         if self.minifilter is not None:
             return self.minifilter.release_pid(pid)
         return True
+
+    # -------------------------------------------- operator kill decisions
+
+    def pending_decisions(self, include_resolved: bool = False) -> List[dict]:
+        """never-kill 보호 때문에 자동 차단을 보류하고 운영자 결정을 기다리는
+        프로세스 목록.  대시보드가 폴링해서 '죽이기/살리기' 버튼을 띄운다."""
+        with self._lock:
+            items = list(self._pending.values())
+        return [p.to_dict() for p in items
+                if include_resolved or p.status == "pending"]
+
+    def resolve_decision(self, pid: int, approve: bool,
+                         by: str = "operator") -> Optional[KillAction]:
+        """운영자가 보류된 never-kill 프로세스에 대해 내린 결정을 집행한다.
+
+        ``approve=True``  -> never-kill 을 무시하고 강제 종료.
+        ``approve=False`` -> 격리 해제하고 살려둔다(오탐으로 판단).
+        """
+        with self._lock:
+            pend = self._pending.get(pid)
+        if pend is None or pend.status != "pending":
+            return None
+
+        if approve:
+            action = self._respond_to_pid(
+                pid, f"{pend.reason} [operator-approved:{by}]", force=True)
+            with self._lock:
+                p = self._pending.get(pid)
+                if p is not None:
+                    p.status = "killed" if action.terminated else "kill-failed"
+            return action
+
+        # 살리기: 커널 격리를 풀고 보류 해제.
+        self.manual_release(pid)
+        with self._lock:
+            p = self._pending.get(pid)
+            if p is not None:
+                p.status = "spared"
+        action = KillAction(
+            time.time(), pid, pend.process_name, pend.cmdline,
+            f"{pend.reason} [operator-spared:{by}]", self.mode.value,
+            quarantined=False, terminated=False,
+            error="operator chose to spare (never-kill override declined)")
+        return self._record(action)
 
     # ---------------------------------------------------- signal callbacks
 
@@ -330,15 +432,33 @@ class ProcessResponder:
     # ---------------------------------------------------- core kill logic
 
     def _respond_to_pid(self, pid: int, reason: str,
-                        *, cap_quarantine: bool = False) -> KillAction:
+                        *, cap_quarantine: bool = False,
+                        force: bool = False) -> KillAction:
         if pid == self._own_pid:
             return self._noop(pid, reason, "refusing to kill self")
 
         proc_name, cmdline = self._lookup(pid)
 
-        if self._is_never_kill(proc_name):
-            return self._noop(pid, reason,
-                              f"{proc_name!r} is on the never-kill list")
+        # never-kill 처리.  ``force`` (운영자 직접 결정)면 통째로 건너뛴다.
+        if not force and self._is_never_kill(proc_name):
+            verdict, detail = self._classify_never_kill(pid, proc_name)
+            if verdict == "imposter":
+                # 이름은 핵심 프로세스인데 실행 경로가 시스템 폴더가 아니다 →
+                # 위장한 가짜다.  진짜는 시스템 폴더에 따로 살아있으므로 안전하게
+                # 죽인다.  never-kill 보호를 적용하지 않고 아래로 통과시킨다.
+                print(f"[responder] ⚠ 위장 탐지: {proc_name!r} 가 "
+                      f"{detail!r} 에서 실행 중 — 진짜 시스템 프로세스가 "
+                      f"아니므로 never-kill 보호를 해제하고 차단합니다")
+            elif self.mode == ResponderMode.KILL:
+                # 이름·경로 모두 정상인 진짜 핵심 프로세스인데 악성 의심이다.
+                # 자동으로 죽이면 시스템이 불안정해질 수 있으니, 격리로 출혈을
+                # 막고 운영자에게 죽일지 물어본다(보류).
+                return self._defer_decision(pid, proc_name, cmdline,
+                                            reason, detail)
+            else:
+                # KILL 모드가 아니면 종전대로 그냥 보호.
+                return self._noop(pid, reason,
+                                  f"{proc_name!r} is on the never-kill list")
 
         # When the pid was *inferred* (correlated from a pid-less signal) we
         # downgrade KILL → QUARANTINE: block the process but don't terminate
@@ -438,6 +558,76 @@ class ProcessResponder:
 
     def _is_never_kill(self, proc_name: str) -> bool:
         return (proc_name or "").lower() in NEVER_KILL
+
+    def _image_path(self, pid: int) -> str:
+        if not HAS_PSUTIL:
+            return ""
+        try:
+            return psutil.Process(pid).exe() or ""
+        except Exception:
+            # 접근 거부/소멸 등 → 경로를 모른다.  호출부에서 안전측(보호)으로
+            # 처리한다.
+            return ""
+
+    def _classify_never_kill(self, pid: int, proc_name: str) -> tuple[str, str]:
+        """never-kill 이름을 가진 프로세스를 분류한다.
+
+        반환: ("imposter", 실행경로)  — 위장한 가짜, 죽여도 안전
+              ("protected", 실행경로) — 진짜(또는 판단불가), 운영자 확인 필요
+        """
+        low = (proc_name or "").lower()
+        if low not in _PATH_VERIFIED_NAMES:
+            # 경로로 진위를 가릴 수 없는 이름(브라우저/개발도구 등) → 항상 보호.
+            return ("protected", "")
+        path = self._image_path(pid)
+        if not path:
+            # 경로를 못 읽으면 진짜일 수 있으니 보호측으로(가짜로 단정하지 않음).
+            return ("protected", "(경로 확인 불가)")
+        norm = path.replace("/", "\\").lower()
+        if any(norm.startswith(root) for root in _SYSTEM_PROCESS_ROOTS):
+            return ("protected", path)   # 정상 시스템 폴더 → 진짜
+        return ("imposter", path)        # 시스템 폴더 밖 → 위장한 가짜
+
+    def _defer_decision(self, pid: int, proc_name: str, cmdline: str,
+                        reason: str, image_path: str) -> KillAction:
+        """진짜 never-kill 프로세스가 악성 의심일 때: 격리로 출혈을 막고
+        운영자 결정을 보류 목록에 올린다(자동 종료하지 않음)."""
+        quarantined = False
+        with self._lock:
+            already_quar = pid in self._already_quarantined
+        if already_quar:
+            quarantined = True
+        elif self.minifilter is not None:
+            try:
+                quarantined = bool(self.minifilter.quarantine_pid(pid))
+            except Exception:
+                quarantined = False
+            if quarantined:
+                with self._lock:
+                    self._already_quarantined.add(pid)
+
+        with self._lock:
+            self._pending[pid] = PendingDecision(
+                timestamp=time.time(), pid=pid, process_name=proc_name,
+                cmdline=cmdline, reason=reason, image_path=image_path,
+                quarantined=quarantined, status="pending")
+            # 메모리 보호: 해결된 항목이 너무 많이 쌓이면 정리.
+            if len(self._pending) > 256:
+                self._pending = {k: v for k, v in self._pending.items()
+                                 if v.status == "pending"}
+
+        print(f"[responder] ⏸ 결정 보류: {proc_name!r} (PID {pid}) 는 "
+              f"never-kill 목록에 있지만 악성으로 의심됩니다 "
+              f"(사유 {reason}). "
+              f"{'격리로 추가 피해는 차단했습니다. ' if quarantined else ''}"
+              f"죽일지 살릴지 대시보드에서 결정하세요 "
+              f"(http://127.0.0.1:5000 → 결정 대기).")
+
+        action = KillAction(
+            time.time(), pid, proc_name, cmdline, reason, self.mode.value,
+            quarantined=quarantined, terminated=False,
+            error="awaiting operator decision (never-kill list)")
+        return self._record(action)
 
     def _lookup(self, pid: int) -> tuple[str, str]:
         if not HAS_PSUTIL:

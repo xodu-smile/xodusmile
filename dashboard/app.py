@@ -73,6 +73,24 @@ def create_app(agent):
         ok = agent.responder.manual_release(pid)
         return jsonify({"ok": ok})
 
+    @app.route("/api/pending")
+    def api_pending():
+        # never-kill 보호로 자동 차단이 보류된, 운영자 결정 대기 목록.
+        return jsonify({"pending": agent.responder.pending_decisions()})
+
+    @app.route("/api/pending/decide", methods=["POST"])
+    def api_pending_decide():
+        body = request.get_json(silent=True) or {}
+        try:
+            pid = int(body.get("pid"))
+        except (TypeError, ValueError):
+            return jsonify({"ok": False, "error": "pid required"}), 400
+        approve = bool(body.get("approve"))
+        action = agent.responder.resolve_decision(pid, approve, by="dashboard")
+        if action is None:
+            return jsonify({"ok": False, "error": "no pending decision"}), 404
+        return jsonify({"ok": True, "action": action.to_dict()})
+
     @app.route("/api/reports")
     def api_reports():
         return jsonify({"reports": agent.incident_reporter.recent(limit=100)})
