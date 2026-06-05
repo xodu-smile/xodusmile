@@ -159,6 +159,11 @@ class Agent:
             self.canary.cleanup()
         except Exception:
             pass
+        # 진행 중이던 통합(campaign) 보고서를 최종 확정하고 finalizer 종료.
+        try:
+            self.incident_reporter.close()
+        except Exception as e:
+            print(f"[agent] incident reporter close failed: {e}")
         print("[agent] stopped")
 
     def status(self) -> dict:

@@ -251,26 +251,6 @@
   }
   .report-link:hover { background: #f0f5ff; border-color: var(--brand); }
 
-  /* ---------- pending decisions (never-kill 수동 확인) ---------- */
-  .pending {
-    display: flex; align-items: center; justify-content: space-between; gap: 12px;
-    border: 1px solid var(--line); border-left: 4px solid var(--warn);
-    border-radius: 10px; padding: 11px 14px; margin-bottom: 9px; background: #fffdf5;
-  }
-  .pending-meta { min-width: 0; }
-  .pending-name { font-weight: 700; }
-  .pending-sub { color: var(--ink-dim); font-size: 12px; margin-top: 3px; word-break: break-all; }
-  .pending-sub .k { color: var(--ink-faint); }
-  .pending-actions { display: flex; gap: 8px; white-space: nowrap; }
-  .btn-kill, .btn-spare {
-    border: 1px solid var(--line); border-radius: 8px; padding: 7px 13px;
-    font-size: 12.5px; font-weight: 700; cursor: pointer; transition: all .15s;
-  }
-  .btn-kill { background: #fde7e7; color: var(--crit); border-color: #f3c0c0; }
-  .btn-kill:hover { background: var(--crit); color: #fff; }
-  .btn-spare { background: var(--card); color: var(--ink-dim); }
-  .btn-spare:hover { background: #eef2f7; }
-
   /* ---------- toast ---------- */
   .toast-stack {
     position: fixed; top: 22px; right: 22px; z-index: 9999;
@@ -464,12 +444,6 @@
       </tbody>
     </table>
   </div>
-</div>
-
-<!-- ===== 결정 대기 (never-kill 수동 확인) ===== -->
-<div class="card proc-card" id="pending-card" style="display:none;">
-  <div class="card-title">⏸ 결정 대기 <span class="hint">— 핵심 프로세스 이름이라 자동 차단을 보류함. 죽일지 직접 결정하세요</span></div>
-  <div class="scroll" id="pending-list"></div>
 </div>
 
 <!-- ===== 차단/격리 기록 ===== -->
@@ -927,52 +901,6 @@
   }
   reportsTick();
   setInterval(reportsTick, 2500);
-
-  /* ---------- 결정 대기 (never-kill 수동 확인) ---------- */
-  const pendingCard = document.getElementById('pending-card');
-  const pendingList = document.getElementById('pending-list');
-
-  async function decide(pid, approve) {
-    try {
-      await fetch('/api/pending/decide', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({pid: pid, approve: approve}),
-      });
-    } catch (e) { /* silent */ }
-    pendingTick();   // 즉시 갱신
-  }
-  window.__decide = decide;
-
-  function renderPending(items) {
-    if (!items.length) { pendingCard.style.display = 'none'; pendingList.innerHTML = ''; return; }
-    pendingCard.style.display = '';
-    pendingList.innerHTML = items.map(p => {
-      const t = new Date(p.timestamp * 1000).toLocaleTimeString();
-      const q = p.quarantined ? '격리됨(추가 피해 차단)' : '격리 안 됨';
-      return `<div class="pending">
-        <div class="pending-meta">
-          <div class="pending-title"><span class="pending-name">${escape(p.process_name)}</span>
-            <span class="k" style="font-size:12px;">PID ${p.pid} · ${t} · ${q}</span></div>
-          <div class="pending-sub"><span class="k">경로</span> ${escape(p.image_path || '(확인 불가)')}</div>
-          <div class="pending-sub"><span class="k">사유</span> ${escape(p.reason)}</div>
-        </div>
-        <div class="pending-actions">
-          <button class="btn-kill" onclick="__decide(${p.pid}, true)">강제 종료</button>
-          <button class="btn-spare" onclick="__decide(${p.pid}, false)">살리기</button>
-        </div>
-      </div>`;
-    }).join('');
-  }
-
-  async function pendingTick() {
-    try {
-      const items = (await (await fetch('/api/pending')).json()).pending || [];
-      renderPending(items);
-    } catch (e) { /* silent */ }
-  }
-  pendingTick();
-  setInterval(pendingTick, 2500);
 </script>
 </body>
 </html>
