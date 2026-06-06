@@ -33,7 +33,7 @@ from dataclasses import dataclass, asdict, field
 from pathlib import Path
 from typing import Deque, Dict, List, Optional
 
-from scoring import ScoringEngine, Signal
+from scoring import ScoringEngine, Signal, ENCRYPTION_SIGNAL_NAMES
 
 # Native desktop notifications are *best effort* and purely advisory: the
 # authoritative record is the markdown report + the dashboard.  When an
@@ -266,6 +266,108 @@ def _unknown_name_note() -> str:
             "**프로세스 번호(PID)** 와 **실행 명령어** 로 추적할 수 있습니다.")
 
 
+# 프로그램(프로세스) 이름 -> "이게 뭐 하는 프로그램인지" 한 줄 설명.  랜섬웨어가
+# 흔히 악용하는 정상 Windows 도구(LOLBin)와 셸을 비전공자도 알 수 있게 풀이한다.
+PROGRAM_KO = {
+    "vssadmin.exe":  "Windows의 **볼륨 섀도(자동 백업본) 관리 도구**입니다. 정상적으로도 쓰이지만, 랜섬웨어가 복구를 막으려 백업을 지울 때 악용합니다.",
+    "wmic.exe":      "Windows 관리 명령 도구(WMIC)입니다. 시스템 정보 조회·관리에 쓰이지만, 랜섬웨어가 백업 삭제 등 파괴 명령에 악용합니다.",
+    "wbadmin.exe":   "Windows **백업 관리 도구**입니다. 랜섬웨어가 백업 카탈로그를 지워 복구를 막을 때 악용합니다.",
+    "bcdedit.exe":   "Windows **부팅 설정 편집 도구**입니다. 랜섬웨어가 복구 환경을 끄거나 부팅을 망가뜨릴 때 악용합니다.",
+    "manage-bde.exe":"BitLocker **디스크 암호화 관리 도구**입니다. 랜섬웨어가 디스크 보호를 해제할 때 악용할 수 있습니다.",
+    "powershell.exe":"Windows **자동화 스크립트 실행기(PowerShell)**입니다. 강력해서 관리에 쓰이지만, 랜섬웨어가 악성 명령·다운로드·은폐 실행에 가장 많이 악용합니다.",
+    "pwsh.exe":      "PowerShell(최신판) **스크립트 실행기**입니다. 악성 스크립트 실행에 악용될 수 있습니다.",
+    "cmd.exe":       "Windows **명령 프롬프트(셸)**입니다. 다른 명령들을 실행하는 통로로, 랜섬웨어가 파괴 명령을 줄줄이 실행할 때 부모 셸로 자주 씁니다.",
+    "wscript.exe":   "Windows **스크립트 실행기**(VBScript/JScript)입니다. 악성 스크립트 실행에 악용됩니다.",
+    "cscript.exe":   "콘솔용 Windows **스크립트 실행기**입니다. 악성 스크립트 실행에 악용됩니다.",
+    "mshta.exe":     "HTML 응용프로그램 실행기입니다. 랜섬웨어가 악성 코드를 숨겨 실행할 때 악용합니다.",
+    "regsvr32.exe":  "DLL 등록 도구입니다. 보안 우회용으로 악성 코드를 실행하는 데 악용됩니다(LOLBin).",
+    "rundll32.exe":  "DLL 함수 실행 도구입니다. 악성 코드를 정상 프로세스처럼 실행하는 데 악용됩니다(LOLBin).",
+    "reg.exe":       "Windows **레지스트리 편집 도구**입니다. 랜섬웨어가 백신을 끄거나 자동 실행을 등록할 때 악용합니다.",
+    "schtasks.exe":  "**예약 작업 등록 도구**입니다. 랜섬웨어가 재부팅 후에도 살아남도록(지속성) 악용합니다.",
+    "wevtutil.exe":  "Windows **이벤트 로그 관리 도구**입니다. 랜섬웨어가 침입 흔적을 지울 때 악용합니다.",
+    "fsutil.exe":    "파일시스템 관리 도구입니다. 랜섬웨어가 파일 변경 이력(USN)을 지워 추적을 방해할 때 악용합니다.",
+    "cipher.exe":    "파일 암호화/완전삭제 도구입니다. 랜섬웨어가 빈 공간을 덮어써 복구를 막을 때 악용합니다.",
+    "netsh.exe":     "Windows **네트워크 설정 도구**입니다. 랜섬웨어가 방화벽을 끌 때 악용합니다.",
+    "bitsadmin.exe": "백그라운드 전송 도구입니다. 랜섬웨어가 추가 악성코드를 몰래 내려받을 때 악용합니다(LOLBin).",
+    "certutil.exe":  "인증서 관리 도구입니다. 랜섬웨어가 파일 다운로드·디코딩에 악용합니다(LOLBin).",
+    "svchost.exe":   "Windows **서비스 호스트**(정상 핵심 프로세스)입니다. 진짜는 보호되지만, 랜섬웨어가 이 이름으로 **위장**해 시스템 폴더 밖에서 실행되면 차단됩니다.",
+    "explorer.exe":  "Windows **파일 탐색기**입니다. 정상 프로세스지만, 악성 스크립트를 띄운 부모로 지목되면 표시될 수 있습니다.",
+    "rundll.exe":    "DLL 실행 도구입니다(구형). 악성 코드 실행에 악용될 수 있습니다.",
+}
+
+
+def _ko_program(name: Optional[str]) -> Optional[str]:
+    """프로세스 이름에 대한 평이한 설명.  모르는 이름이면 None."""
+    return PROGRAM_KO.get((name or "").strip().lower())
+
+
+def _program_note(name: str) -> str:
+    """'어떤 프로그램이었나요'에 붙일 한 줄 설명.
+
+    알려진 도구면 그 설명을, 모르는 이름이면 '정체불명' 안내를 준다.
+    """
+    desc = _ko_program(name)
+    if desc:
+        return desc
+    return ("이 시스템에 표준으로 들어있는 알려진 도구가 아닙니다. 직접 설치했거나 "
+            "최근 내려받은 프로그램이 아니라면, 정상으로 위장한 악성 실행 파일일 수 "
+            "있으니 아래 **실행 명령어**의 경로를 확인하세요.")
+
+
+def _explain_cmdline(cmd: Optional[str]) -> str:
+    """실행 명령어를 비전공자용으로 한 줄 풀이한다.
+
+    cmdline 본문에서 랜섬웨어가 흔히 쓰는 키워드를 찾아 '무엇을 하려는
+    명령인지' 평이하게 설명한다.  여러 개면 대표적인 것들을 모아 보여준다.
+    """
+    if not cmd or cmd == "(확인 불가)":
+        return ("실행 명령어를 확인하지 못했습니다(프로그램이 이미 종료됨). "
+                "위 프로그램 이름과 PID로 판단하세요.")
+    low = cmd.lower()
+    notes: List[str] = []
+    # (키워드들, 설명) — 순서대로 검사, 중복 설명은 한 번만.
+    table = [
+        (("delete shadows", "shadowcopy delete", "shadowstorage", "win32_shadowcopy"),
+         "자동 백업(볼륨 섀도)을 삭제하려는 명령입니다 — 복구 방해."),
+        (("delete catalog", "wbadmin delete"),
+         "Windows 백업 카탈로그를 삭제하려는 명령입니다 — 복구 방해."),
+        (("recoveryenabled no", "bootstatuspolicy", "safeboot", "bcdedit"),
+         "Windows 부팅·복구 설정을 망가뜨리려는 명령입니다."),
+        (("disablerealtimemonitoring", "disableantispyware", "add-mppreference",
+          "set-mppreference", "defender"),
+         "백신(Windows Defender)을 끄거나 검사 예외를 추가하려는 명령입니다."),
+        (("clear-eventlog", "wevtutil cl", "wevtutil clear"),
+         "Windows 이벤트 로그를 지워 흔적을 없애려는 명령입니다."),
+        (("usn deletejournal", "fsutil usn"),
+         "파일 변경 이력(USN)을 삭제해 추적을 방해하려는 명령입니다."),
+        (("cipher /w", "cipher.exe /w"),
+         "빈 디스크 공간을 덮어써 삭제된 파일 복구를 막으려는 명령입니다."),
+        (("firewall set", "advfirewall", "netsh "),
+         "Windows 방화벽 설정을 바꾸려는(주로 끄려는) 명령입니다."),
+        (("manage-bde", "disable-bitlocker"),
+         "BitLocker 디스크 암호화를 해제하려는 명령입니다."),
+        (("schtasks", "/create"),
+         "예약 작업을 등록해 재부팅 후에도 다시 실행되게 하려는(지속성) 명령입니다."),
+        (("currentversion\\run", "\\run "),
+         "자동 실행 목록에 등록해 재부팅 후에도 살아남으려는(지속성) 명령입니다."),
+        (("-enc ", "-encodedcommand", "frombase64string", "-nop", "-noprofile",
+          "-w hidden", "-windowstyle hidden", "iex", "invoke-expression"),
+         "정체를 숨긴(난독화된) PowerShell 명령을 실행하려는 시도입니다."),
+        (("downloadstring", "downloadfile", "invoke-webrequest", "bitsadmin",
+          "certutil -urlcache", "start-bitstransfer"),
+         "외부에서 추가 파일(주로 악성코드)을 내려받으려는 명령입니다."),
+    ]
+    seen: set = set()
+    for keys, desc in table:
+        if any(k in low for k in keys) and desc not in seen:
+            seen.add(desc)
+            notes.append(desc)
+    if not notes:
+        return ("이 프로그램이 실행될 때 사용된 명령(인자)입니다. 특별히 알려진 "
+                "공격 키워드는 없지만, 차단 사유와 함께 참고하세요.")
+    return " ".join(f"• {n}" for n in notes)
+
+
 def _campaign_behaviors(camp) -> List[dict]:
     """공격에서 관측된 *모든* 고유 위협 행위를 시간순으로 모은다.
 
@@ -284,20 +386,54 @@ def _campaign_behaviors(camp) -> List[dict]:
                 return v
         return None
 
+    # 행위로 인정할 신호를 한정한다.  통합 보고서가 "차단과 무관한 부수
+    # 신호"(예: svchost 가 정상적으로 Run 키를 쓰며 낸 run_key_persistence)까지
+    # 행위로 부풀리지 않게 하기 위함 — 개별 보고서의 차단 사유와 어긋나던 원인.
+    #   포함 = (1) 실제 차단 사유로 쓰인 신호  ∪  (2) 실제 암호화/파괴 신호
+    reason_signals = set()
+    for m in camp.members:
+        sn = _signame_from_reason(m.get("reason"))
+        if sn and sn != _SWEEP_REASON:
+            reason_signals.add(sn)
+
+    def _is_behavior(name: str) -> bool:
+        return name in reason_signals or name in ENCRYPTION_SIGNAL_NAMES
+
     first_ts: dict = {}
-    first_proc: dict = {}
+    # 행위 종류별로 "그 행위를 한 모든 프로세스"를 모은다 (처음 관측 순서 보존).
+    procs: dict = {}
+    # 행위 종류별 {프로세스: 처음 발생 시각} — 시간순 목록을 프로세스 단위로
+    # 펼치기 위함 (같은 종류라도 프로세스가 다르면 각각 한 줄).
+    proc_first_ts: dict = {}
 
     def _consider(name: str, ts: float, proc: Optional[str]) -> None:
-        if name in first_ts and ts >= first_ts[name]:
-            return
-        first_ts[name] = ts
-        first_proc[name] = "unknown" if _is_unknown_name(proc) else proc
+        if name not in first_ts or ts < first_ts[name]:
+            first_ts[name] = ts
+        proc_label = "unknown" if _is_unknown_name(proc) else proc
+        bucket = procs.setdefault(name, [])
+        if proc_label not in bucket:
+            bucket.append(proc_label)
+        pf = proc_first_ts.setdefault(name, {})
+        if proc_label not in pf or ts < pf[proc_label]:
+            pf[proc_label] = ts
+
+    def _note_ts(name: str, ts: float) -> None:
+        if name not in first_ts or ts < first_ts[name]:
+            first_ts[name] = ts
+        procs.setdefault(name, [])
 
     for s in camp.signals:
+        if not _is_behavior(s.name):
+            continue
         pid = _pid_of(s)
-        proc = (pid_to_name.get(pid)
-                or (s.metadata or {}).get("process")
-                or "unknown")
+        proc = pid_to_name.get(pid)
+        # 신호의 pid 가 '실제로 차단된 프로세스'가 아니면(예: vssadmin/wmic 을
+        # 실행한 부모 셸 cmd.exe — 명령줄에만 스쳐갈 뿐 차단 대상이 아님)
+        # '누가 했나'에 넣지 않는다.  행위 시각만 기록하고, 실제 수행
+        # 프로세스는 차단 기록(members)에서 채운다.
+        if _is_unknown_name(proc):
+            _note_ts(s.name, s.timestamp)
+            continue
         _consider(s.name, s.timestamp, proc)
     for m in camp.members:
         sn = _signame_from_reason(m.get("reason"))
@@ -307,12 +443,24 @@ def _campaign_behaviors(camp) -> List[dict]:
 
     out: List[dict] = []
     for name in sorted(first_ts, key=lambda n: first_ts[n]):
+        bucket = procs.get(name) or ["unknown"]
+        # 실제 이름들을 앞에, 'unknown'은 맨 뒤로 정렬(가독성).
+        named = [p for p in bucket if not _is_unknown_name(p)]
+        proc_list = named + (["unknown"] if len(named) != len(bucket) else [])
+        if not proc_list:
+            proc_list = ["unknown"]
+        # 시간순 목록용: (시각, 프로세스) 발생을 시간순으로.  실제 차단된
+        # 프로세스가 하나도 없으면(부모 셸만 신호를 낸 경우) unknown 1건으로.
+        events = sorted((ts, p) for p, ts in proc_first_ts.get(name, {}).items())
+        if not events:
+            events = [(first_ts[name], "unknown")]
         out.append({
             "ts": first_ts[name],
             "name": name,
             "what": SIGNAL_KO.get(name) or f"위협 신호({name})가 감지되었습니다.",
             "why": SIGNAL_WHY.get(name),
-            "proc": first_proc.get(name) or "unknown",
+            "procs": proc_list,
+            "events": events,
         })
     return out
 
@@ -441,8 +589,119 @@ def _damage_lines(d: dict) -> List[str]:
             lines.append(f"  - `{p}`")
     lines.append("")
     lines.append("> 이 수치는 탐지기가 **관측한 신호 기준의 최소 추정치**입니다. "
-                 "차단 직전 짧은 순간의 일부 작업은 누락될 수 있고, 디스크 단위의 "
-                 "정확한 피해 집계는 `postmortem.py`(디코이 기준)를 참고하세요.")
+                 "차단 직전 짧은 순간의 일부 작업은 누락될 수 있습니다.")
+    return lines
+
+
+# 이미 압축/이미지인 확장자는 원래부터 무작위처럼 보이므로 '암호화 정황'
+# 엔트로피 판정에서 제외한다(정상 파일 오판 방지).
+_HIGH_ENTROPY_SKIP_EXTS = {
+    ".zip", ".rar", ".7z", ".gz", ".bz2", ".xz", ".jpg", ".jpeg", ".png",
+    ".gif", ".mp4", ".mov", ".mkv", ".avi", ".mp3", ".pdf", ".docx",
+    ".xlsx", ".pptx",
+}
+
+# 커널 신호의 디바이스 경로(\Device\HarddiskVolumeN\..) -> 드라이브 경로.
+_DEVICE_PATH_RE = re.compile(r"\\Device\\HarddiskVolume\d+\\(.*)", re.IGNORECASE)
+
+
+def _norm_disk_path(p: str) -> str:
+    m = _DEVICE_PATH_RE.match(p or "")
+    if m:
+        # 볼륨 번호->드라이브 문자 매핑은 알 수 없어 C: 로 가정(best-effort).
+        return "C:\\" + m.group(1)
+    return p
+
+
+def _shannon_entropy(data: bytes) -> float:
+    if not data:
+        return 0.0
+    from collections import Counter as _C
+    counts = _C(data)
+    n = len(data)
+    import math as _m
+    return -sum((c / n) * _m.log2(c / n) for c in counts.values())
+
+
+def verify_damage_on_disk(d: dict) -> dict:
+    """summarize_damage 결과의 신호 경로들을 *실제 디스크*에서 확인한다.
+
+    폴더 전체를 훑지 않고, 랜섬웨어가 실제로 건드린 경로만 본다(빠르고 정확).
+    각 파일이 지금 사라졌는지/내용이 암호화됐는지 실측한다.
+    """
+    # 검사 대상: 변조/암호화·이름변경으로 '현재 존재할 법한' 경로 + 삭제 경로.
+    touched = {_norm_disk_path(p) for p in (d["encrypted"] | d["renamed"])}
+    deleted_paths = {_norm_disk_path(p) for p in d["deleted"]}
+
+    gone: List[str] = []
+    encrypted_now: List[str] = []
+    present: List[str] = []
+
+    for p in sorted(touched):
+        try:
+            fp = Path(p)
+            if not fp.exists():
+                gone.append(p)
+                continue
+            present.append(p)
+            if fp.suffix.lower() in _HIGH_ENTROPY_SKIP_EXTS:
+                continue
+            try:
+                head = fp.read_bytes()[:4096]
+            except OSError:
+                continue
+            if _shannon_entropy(head) > 7.5:
+                encrypted_now.append(p)
+        except OSError:
+            continue
+
+    # 신호가 '삭제'로 본 경로 중 실제로 사라진 것 (위 touched 의 gone 과 중복 제거).
+    gone_set = set(gone)
+    deleted_confirmed = []
+    for p in sorted(deleted_paths):
+        if p in gone_set:
+            continue
+        try:
+            if not Path(p).exists():
+                deleted_confirmed.append(p)
+                gone_set.add(p)
+        except OSError:
+            pass
+
+    # 전체 검사 대상(중복 제거).
+    all_checked = touched | deleted_paths
+    return {
+        "checked": len(all_checked),
+        "present": present,
+        "gone": gone,
+        "encrypted_now": encrypted_now,
+        "deleted_confirmed": deleted_confirmed,
+    }
+
+
+def _disk_verify_lines(v: dict) -> List[str]:
+    lines: List[str] = []
+    if v["checked"] == 0:
+        lines.append("- 디스크에서 확인할 파일 경로가 신호에 없습니다 "
+                     "(경로 없는 신호만 있었던 경우).")
+        return lines
+    gone_total = len(set(v["gone"]) | set(v["deleted_confirmed"]))
+    lines.append(f"- **확인한 파일 경로:** {v['checked']}개 (랜섬웨어가 실제로 "
+                 "건드린 경로만 검사 — 폴더 전체 스캔 아님)")
+    lines.append(f"- **현재 사라진(삭제된) 파일:** {gone_total}개")
+    lines.append(f"- **현재 내용이 암호화로 확인된 파일:** {len(v['encrypted_now'])}개")
+    lines.append(f"- **아직 멀쩡히 남아있는 파일:** "
+                 f"{max(0, len(v['present']) - len(v['encrypted_now']))}개")
+    gone_all = list(dict.fromkeys(v["gone"] + v["deleted_confirmed"]))  # 순서보존 중복제거
+    if v["encrypted_now"] or gone_all:
+        lines.append("- **실측 예시:**")
+        for p in v["encrypted_now"][:5]:
+            lines.append(f"  - 🔒 `{p}` (내용 암호화 확인)")
+        for p in gone_all[:3]:
+            lines.append(f"  - 🗑 `{p}` (사라짐)")
+    lines.append("")
+    lines.append("> 차단 직후 **디스크를 직접 확인한 결과**입니다. 위 '추정 피해 "
+                 "범위'(신호 기준)와 달리, 실제로 파일이 어떻게 됐는지 보여줍니다.")
     return lines
 
 
@@ -689,6 +948,8 @@ class IncidentReporter:
         lines.append(f"- **프로그램 이름:** `{proc_name}`")
         if name_unknown:
             lines.append(f"  - ℹ️ {_unknown_name_note()}")
+        else:
+            lines.append(f"  - ℹ️ {_program_note(proc_name)}")
         lines.append(f"- **프로세스 번호(PID):** `{action.pid}`")
         det = _detector_from_reason(action.reason)
         det_label = _ko_detector(det) if det else "종합 위험도 판정"
@@ -698,6 +959,7 @@ class IncidentReporter:
         lines.append("  ```")
         lines.append(f"  {cmd}")
         lines.append("  ```")
+        lines.append(f"  - ℹ️ **명령어 풀이:** {_explain_cmdline(action.cmdline)}")
         lines.append("")
 
         lines.append("## 어떤 조치를 했나요")
@@ -935,8 +1197,9 @@ class IncidentReporter:
             L.append(f"- **무슨 공격이었나요?** 이 공격에서 "
                      f"**{len(behaviors)}가지** 위협 행위가 관측되었습니다:")
             for b in behaviors[:_SUMMARY_MAX]:
-                # 형식: "무엇을 했나: 어떤 프로세스가 — 왜 위험한가"
-                line = f"  - **{_short_action(b['what'])}**: `{b['proc']}`"
+                # 형식: "무엇을 했나: 어떤 프로세스들이 — 왜 위험한가"
+                procs_txt = ", ".join(f"`{p}`" for p in b["procs"])
+                line = f"  - **{_short_action(b['what'])}**: {procs_txt}"
                 if b["why"]:
                     line += f" — **왜 위험하냐면,** {b['why']}"
                 L.append(line)
@@ -960,12 +1223,18 @@ class IncidentReporter:
         if behaviors:
             L.append("## 관측된 위협 행위 (시간순)")
             L.append("")
-            L.append("이 공격이 진행되는 동안 탐지된 모든 행위입니다 "
-                     "(같은 종류는 처음 관측 시각으로 한 번만 표기).")
+            L.append("이 공격이 진행되는 동안 탐지된 행위를 "
+                     "**프로세스별로 시간순** 나열했습니다.")
             L.append("")
+            # 각 행위를 (프로세스, 시각) 단위로 펼쳐 전체를 시간순 정렬한다.
+            timeline = []
             for b in behaviors:
-                t = time.strftime("%H:%M:%S", time.localtime(b["ts"]))
-                L.append(f"- `{t}` `{b['proc']}` — {b['what']}")
+                for ts, proc in b["events"]:
+                    timeline.append((ts, proc, b["what"]))
+            timeline.sort(key=lambda x: x[0])
+            for ts, proc, what in timeline:
+                t = time.strftime("%H:%M:%S", time.localtime(ts))
+                L.append(f"- `{t}` `{proc}` — {what}")
             L.append("")
 
         L.append("## 처리한 프로세스 목록")
@@ -983,10 +1252,18 @@ class IncidentReporter:
                      f"| [{m['incident_file']}]({m['incident_file']}) |")
         L.append("")
 
-        L.append("## 통합 피해 범위")
+        L.append("## 통합 피해 범위 (탐지 신호 기준 추정)")
         L.append("")
         L.extend(_damage_lines(damage))
         L.append("")
+
+        # 차단 직후 디스크 실측: 신호에 기록된 경로만 확인(폴더 전체 스캔 아님).
+        disk = verify_damage_on_disk(damage)
+        if disk["checked"]:
+            L.append("## 실제 피해 검증 (차단 후 디스크 확인)")
+            L.append("")
+            L.extend(_disk_verify_lines(disk))
+            L.append("")
 
         if camp_signals:
             L.append("## 통합 탐지 타임라인")
