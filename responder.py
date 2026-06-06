@@ -202,7 +202,14 @@ class ProcessResponder:
         # 1. PID-scoped reaction: any HIGH/CRITICAL signal that names a PID.
         pid = self._extract_pid(sig)
         if pid and sig.severity in (Severity.HIGH, Severity.CRITICAL):
-            self._respond_to_pid(pid, f"{sig.detector}/{sig.name}")
+            # 탐지 시점에 신호가 들고 온 프로세스 이름/명령줄.  일회성 도구
+            # (vssadmin/wmic 등)는 차단 시점엔 이미 종료돼 psutil 조회가
+            # 실패하므로, 이 값들을 표시용 폴백으로 넘긴다.
+            meta = sig.metadata or {}
+            hint = meta.get("process") or ""
+            cmd_hint = meta.get("cmdline") or ""
+            self._respond_to_pid(pid, f"{sig.detector}/{sig.name}",
+                                  name_hint=hint, cmd_hint=cmd_hint)
 
             # 1b. Parent escalation: ransomware drives destruction through
             #     LOLBins/tools (vssadmin, powershell, cmd, wbadmin, ...) that
@@ -265,15 +272,24 @@ class ProcessResponder:
 
     # ---------------------------------------------------- core kill logic
 
-    def _respond_to_pid(self, pid: int, reason: str) -> KillAction:
+    def _respond_to_pid(self, pid: int, reason: str,
+                        name_hint: str = "", cmd_hint: str = "") -> KillAction:
         if pid == self._own_pid:
             return self._noop(pid, reason, "refusing to kill self")
 
         proc_name, cmdline, exe_path = self._lookup(pid)
 
+        # never-kill 판정은 *조회된* 이름/경로로만 한다(힌트로 판정을 바꾸지
+        # 않음).  판정 후, 표시용 이름/명령줄이 비어 있을 때만 탐지 시점
+        # 힌트로 채워 보고서에 'unknown'·'확인 불가' 대신 실제 도구 이름과
+        # 명령줄이 남게 한다.
         if self._is_never_kill(proc_name, exe_path):
             return self._noop(pid, reason,
                               f"{proc_name!r} is on the never-kill list")
+        if not proc_name and name_hint:
+            proc_name = name_hint
+        if not cmdline and cmd_hint:
+            cmdline = cmd_hint
 
         with self._lock:
             already_killed = pid in self._already_killed
