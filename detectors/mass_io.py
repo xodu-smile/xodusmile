@@ -56,6 +56,20 @@ TARGET_EXTENSIONS = {
     ".psd", ".dwg",
 }
 
+# 오탐 방지 — *원래부터* 무작위(고엔트로피)처럼 보이는 형식들.  압축·이미지·
+# 미디어 파일은 정상이어도 엔트로피가 7.5+ 라서, 이들을 단순히 "고엔트로피라
+# 암호화 의심"으로 보면 정상 재저장(사진 편집, 동영상 변환, 압축본 갱신)이
+# high_entropy_write 오탐을 낸다.  이 형식들은 엔트로피 단독 신호에서 제외하고
+# (matched magic 이 사라지는 magic_bytes_lost 나 의심 확장자 변경 같은 *변화*
+# 기반 신호로만 본다).  매직바이트 테이블에 없는 미디어(mp3/mp4/avi/mov/mkv)가
+# 특히 오탐의 주범이었다.  incident_report._HIGH_ENTROPY_SKIP_EXTS 와 같은 의도.
+NATIVE_HIGH_ENTROPY_EXTS = {
+    ".zip", ".rar", ".7z", ".gz", ".bz2", ".xz", ".cab", ".jar", ".apk",
+    ".jpg", ".jpeg", ".png", ".gif", ".webp", ".heic",
+    ".mp3", ".aac", ".ogg", ".flac", ".m4a",
+    ".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v",
+}
+
 # 가중치
 W_HIGH_ENTROPY_WRITE = 8       # 단일 파일이 고엔트로피로 변함
 W_MAGIC_LOST = 12              # 매직바이트 소실
@@ -255,7 +269,10 @@ class MassIODetector(Detector):
         # 시그널 2: 고엔트로피 + 알려진 형식이 아님
         if ent >= self._entropy_bar() and magic is None:
             ext = path.suffix.lower()
-            if ext in TARGET_EXTENSIONS:
+            # 원래부터 고엔트로피인 압축·미디어 형식은 제외(오탐 방지).  이들이
+            # 실제로 암호화되면 magic_bytes_lost / suspicious_extension / burst
+            # 같은 *변화* 신호로 잡힌다 — 정적 엔트로피만으로 판정하지 않는다.
+            if ext in TARGET_EXTENSIONS and ext not in NATIVE_HIGH_ENTROPY_EXTS:
                 self._count_encryption_event()
                 self.emit(Signal(
                     detector=self.name, name="high_entropy_write",

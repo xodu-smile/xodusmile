@@ -4,6 +4,8 @@ Flask Dashboard
 
 from flask import Flask, Response, jsonify, render_template, request
 
+import attack_map
+
 
 def create_app(agent):
     app = Flask(
@@ -37,7 +39,12 @@ def create_app(agent):
         # showing stale CRITICAL rows under an "all clear" score.  Newest first.
         # The full audit trail still lives in the SQLite store + incident reports.
         sigs = agent.engine.recent_signals(100)
-        return jsonify({"events": [s.to_dict() for s in reversed(sigs)]})
+        # Annotate each event with its MITRE ATT&CK technique(s) so the admin
+        # view can show a standard taxonomy badge without changing detection.
+        return jsonify({
+            "events": [attack_map.annotate_signal_dict(s.to_dict())
+                       for s in reversed(sigs)]
+        })
 
     @app.route("/api/processes")
     def api_processes():
@@ -84,5 +91,60 @@ def create_app(agent):
             return jsonify({"ok": False, "error": "not found"}), 404
         # text/markdown so browsers render-as-text and curl pipes cleanly.
         return Response(body, mimetype="text/markdown; charset=utf-8")
+
+    # ----------------------------------------------------- administrator panel
+
+    @app.route("/api/admin/health")
+    def api_admin_health():
+        """System-health snapshot: responder mode, driver, uptime, detectors."""
+        return jsonify(agent.health())
+
+    @app.route("/api/admin/mode", methods=["POST"])
+    def api_admin_mode():
+        """Change the responder mode (off|quarantine|kill) at runtime."""
+        body = request.get_json(silent=True) or {}
+        mode = str(body.get("mode") or "").lower()
+        if mode not in ("off", "quarantine", "kill"):
+            return jsonify({"ok": False,
+                            "error": "mode must be off|quarantine|kill"}), 400
+        try:
+            new_mode = agent.set_responder_mode(mode)
+        except Exception as e:
+            return jsonify({"ok": False, "error": str(e)}), 500
+        return jsonify({"ok": True, "mode": new_mode})
+
+    @app.route("/api/admin/threats")
+    def api_admin_threats():
+        """Per-PID threat breakdown with ATT&CK tags for triage."""
+        return jsonify(agent.threat_breakdown())
+
+    @app.route("/api/admin/allowlist", methods=["GET"])
+    def api_admin_allowlist_get():
+        return jsonify({"entries": agent.allowlist.entries()})
+
+    @app.route("/api/admin/allowlist", methods=["POST"])
+    def api_admin_allowlist_add():
+        body = request.get_json(silent=True) or {}
+        value = str(body.get("value") or "").strip()
+        if not value:
+            return jsonify({"ok": False, "error": "value required"}), 400
+        try:
+            entry = agent.allowlist.add(
+                value, kind=str(body.get("kind") or ""),
+                note=str(body.get("note") or ""))
+        except ValueError as e:
+            return jsonify({"ok": False, "error": str(e)}), 400
+        return jsonify({"ok": True, "entry": entry,
+                        "entries": agent.allowlist.entries()})
+
+    @app.route("/api/admin/allowlist", methods=["DELETE"])
+    def api_admin_allowlist_del():
+        body = request.get_json(silent=True) or {}
+        value = str(body.get("value") or "").strip()
+        if not value:
+            return jsonify({"ok": False, "error": "value required"}), 400
+        removed = agent.allowlist.remove(value, kind=str(body.get("kind") or ""))
+        return jsonify({"ok": True, "removed": removed,
+                        "entries": agent.allowlist.entries()})
 
     return app

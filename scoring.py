@@ -61,6 +61,8 @@ ENCRYPTION_SIGNAL_NAMES = frozenset({
     "suspicious_extension",
     # canary (고신뢰 미끼 파일)
     "canary_modified", "canary_deleted",
+    # ransom note (협박문 살포 — 암호화 정황의 직접 증거)
+    "ransom_note_dropped", "ransom_note_spread",
     # 커널 미니필터 (PID 단위 관측)
     "kernel_write_burst", "kernel_rename_burst", "kernel_blocked_op",
 })

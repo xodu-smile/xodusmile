@@ -1,0 +1,424 @@
+"""
+Tests for responder.ProcessResponder
+--------------------------------------
+psutil-dependent kill tests are guarded with @pytest.mark.windows.
+Pure-logic tests (never-kill list, path verification, mode switching,
+allowlist noop, lolbin detection, pid extraction) run on any platform.
+"""
+
+import pytest
+
+from responder import (
+    ESCALATE_CHILD_NAMES,
+    NEVER_KILL,
+    PATH_VERIFIED,
+    ProcessResponder,
+    ResponderMode,
+    _TRUSTED_DIRS,
+)
+from scoring import ScoringEngine, Signal, Severity
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _make_engine():
+    return ScoringEngine()
+
+
+def _make_responder(engine=None, mode=ResponderMode.OFF, allowlist=None):
+    if engine is None:
+        engine = _make_engine()
+    return ProcessResponder(engine, mode=mode, allowlist=allowlist)
+
+
+def _make_signal(name="high_entropy_write", severity=Severity.HIGH, metadata=None):
+    return Signal(
+        detector="test", name=name, weight=10,
+        severity=severity, message="test",
+        metadata=metadata or {},
+    )
+
+
+class FakeAllowlist:
+    """Minimal allowlist stub exposing pid_allowed."""
+
+    def __init__(self, allowed_pids=None):
+        self._allowed = set(allowed_pids or [])
+
+    def pid_allowed(self, pid):
+        return pid in self._allowed
+
+
+# ---------------------------------------------------------------------------
+# NEVER_KILL set contents
+# ---------------------------------------------------------------------------
+
+class TestNeverKillSet:
+    def test_lsass_in_never_kill(self):
+        assert "lsass.exe" in NEVER_KILL
+
+    def test_csrss_in_never_kill(self):
+        assert "csrss.exe" in NEVER_KILL
+
+    def test_explorer_in_never_kill(self):
+        assert "explorer.exe" in NEVER_KILL
+
+    def test_svchost_in_never_kill(self):
+        assert "svchost.exe" in NEVER_KILL
+
+    def test_winlogon_in_never_kill(self):
+        assert "winlogon.exe" in NEVER_KILL
+
+    def test_services_in_never_kill(self):
+        assert "services.exe" in NEVER_KILL
+
+    def test_smss_in_never_kill(self):
+        assert "smss.exe" in NEVER_KILL
+
+    def test_set_is_all_lowercase(self):
+        for name in NEVER_KILL:
+            assert name == name.lower(), f"{name!r} is not all lowercase"
+
+
+# ---------------------------------------------------------------------------
+# _is_never_kill
+# ---------------------------------------------------------------------------
+
+class TestIsNeverKill:
+    def _responder(self):
+        return _make_responder()
+
+    def test_lsass_is_always_never_kill(self):
+        r = self._responder()
+        assert r._is_never_kill("lsass.exe", "") is True
+
+    def test_lsass_with_system32_path_is_never_kill(self):
+        r = self._responder()
+        import os
+        sysroot = os.environ.get("SystemRoot", r"C:\Windows")
+        path = os.path.join(sysroot, "System32", "lsass.exe")
+        assert r._is_never_kill("lsass.exe", path) is True
+
+    def test_svchost_impostor_in_temp_is_not_protected(self):
+        """svchost.exe from C:\\Temp is not protected (PATH_VERIFIED impostor)."""
+        r = self._responder()
+        assert r._is_never_kill("svchost.exe", r"C:\Temp\svchost.exe") is False
+
+    def test_svchost_from_system32_is_protected(self):
+        import os
+        r = self._responder()
+        sysroot = os.environ.get("SystemRoot", r"C:\Windows")
+        path = os.path.join(sysroot, "System32", "svchost.exe")
+        assert r._is_never_kill("svchost.exe", path) is True
+
+    def test_unknown_process_is_not_never_kill(self):
+        r = self._responder()
+        assert r._is_never_kill("evilware.exe", "") is False
+
+    def test_name_check_is_case_insensitive(self):
+        r = self._responder()
+        assert r._is_never_kill("LSASS.EXE", "") is True
+
+    def test_csrss_impostor_in_temp_is_not_protected(self):
+        r = self._responder()
+        assert r._is_never_kill("csrss.exe", r"C:\Temp\csrss.exe") is False
+
+    def test_python_exe_is_always_protected(self):
+        """python.exe is in NEVER_KILL but NOT in PATH_VERIFIED → always protected."""
+        r = self._responder()
+        assert r._is_never_kill("python.exe", r"C:\Temp\python.exe") is True
+
+
+# ---------------------------------------------------------------------------
+# _path_is_untrusted
+# ---------------------------------------------------------------------------
+
+class TestPathIsUntrusted:
+    def test_empty_path_is_not_untrusted(self):
+        """Empty path → fail safe → not stripped of immunity."""
+        assert ProcessResponder._path_is_untrusted("") is False
+
+    def test_system32_path_is_not_untrusted(self):
+        import os
+        sysroot = os.environ.get("SystemRoot", r"C:\Windows")
+        path = os.path.join(sysroot, "System32", "svchost.exe")
+        assert ProcessResponder._path_is_untrusted(path) is False
+
+    def test_temp_path_is_untrusted(self):
+        import os
+        # A path clearly outside System32/SysWOW64
+        path = r"C:\Temp\svchost.exe"
+        # normcase it to match the implementation
+        assert ProcessResponder._path_is_untrusted(path) is True
+
+    def test_user_appdata_path_is_untrusted(self):
+        path = r"C:\Users\victim\AppData\Local\Temp\malware.exe"
+        assert ProcessResponder._path_is_untrusted(path) is True
+
+    def test_syswow64_path_is_not_untrusted(self):
+        import os
+        sysroot = os.environ.get("SystemRoot", r"C:\Windows")
+        path = os.path.join(sysroot, "SysWOW64", "svchost.exe")
+        assert ProcessResponder._path_is_untrusted(path) is False
+
+
+# ---------------------------------------------------------------------------
+# set_mode
+# ---------------------------------------------------------------------------
+
+class TestSetMode:
+    def test_set_mode_quarantine_changes_mode(self):
+        r = _make_responder(mode=ResponderMode.OFF)
+        r.set_mode(ResponderMode.QUARANTINE)
+        assert r.mode == ResponderMode.QUARANTINE
+
+    def test_set_mode_kill_changes_mode(self):
+        r = _make_responder(mode=ResponderMode.OFF)
+        r.set_mode(ResponderMode.KILL)
+        assert r.mode == ResponderMode.KILL
+
+    def test_set_mode_off_changes_mode(self):
+        r = _make_responder(mode=ResponderMode.KILL)
+        r.set_mode(ResponderMode.OFF)
+        assert r.mode == ResponderMode.OFF
+
+    def test_set_mode_returns_new_mode(self):
+        r = _make_responder()
+        result = r.set_mode(ResponderMode.QUARANTINE)
+        assert result == ResponderMode.QUARANTINE
+
+    def test_set_mode_accepts_string_value(self):
+        r = _make_responder()
+        r.set_mode(ResponderMode("quarantine"))
+        assert r.mode == ResponderMode.QUARANTINE
+
+
+# ---------------------------------------------------------------------------
+# Allowlist integration — noop when pid is allowlisted
+# ---------------------------------------------------------------------------
+
+class TestAllowlistIntegration:
+    def _make_lookup_patcher(self, responder, name, cmdline="", exe=""):
+        """Monkeypatch _lookup to return a fixed (name, cmdline, exe_path) tuple."""
+        responder._lookup = lambda pid: (name, cmdline, exe)
+
+    def test_allowlisted_pid_produces_noop_action(self):
+        """A pid that the allowlist approves is never killed regardless of mode."""
+        engine = _make_engine()
+        fake_al = FakeAllowlist(allowed_pids={1234})
+        # Use KILL mode so that without the allowlist the pid would be killed
+        r = _make_responder(engine=engine, mode=ResponderMode.KILL, allowlist=fake_al)
+        self._make_lookup_patcher(r, "myapp.exe", "", r"C:\app\myapp.exe")
+        action = r._respond_to_pid(1234, "test/high_entropy_write")
+        assert action.error is not None
+        assert "allowlist" in action.error.lower()
+
+    def test_allowlisted_pid_is_not_terminated(self):
+        engine = _make_engine()
+        fake_al = FakeAllowlist(allowed_pids={1234})
+        r = _make_responder(engine=engine, mode=ResponderMode.KILL, allowlist=fake_al)
+        self._make_lookup_patcher(r, "myapp.exe", "", r"C:\app\myapp.exe")
+        action = r._respond_to_pid(1234, "test/high_entropy_write")
+        assert action.terminated is False
+
+    def test_allowlisted_pid_is_not_quarantined(self):
+        engine = _make_engine()
+        fake_al = FakeAllowlist(allowed_pids={1234})
+        r = _make_responder(engine=engine, mode=ResponderMode.KILL, allowlist=fake_al)
+        self._make_lookup_patcher(r, "myapp.exe", "", r"C:\app\myapp.exe")
+        action = r._respond_to_pid(1234, "test/high_entropy_write")
+        assert action.quarantined is False
+
+    def test_non_allowlisted_pid_in_off_mode_records_action(self):
+        engine = _make_engine()
+        fake_al = FakeAllowlist(allowed_pids=set())  # nobody allowed
+        r = _make_responder(engine=engine, mode=ResponderMode.OFF, allowlist=fake_al)
+        self._make_lookup_patcher(r, "badapp.exe", "badapp.exe --encrypt", r"C:\Temp\badapp.exe")
+        action = r._respond_to_pid(9999, "test/high_entropy_write")
+        # OFF mode records but does not terminate
+        assert action.terminated is False
+        assert action.error is not None  # "responder mode = off"
+
+
+# ---------------------------------------------------------------------------
+# _is_lolbin_signal
+# ---------------------------------------------------------------------------
+
+class TestIsLolbinSignal:
+    def test_vssadmin_process_is_lolbin(self):
+        r = _make_responder()
+        sig = _make_signal(metadata={"process": "vssadmin.exe"})
+        assert r._is_lolbin_signal(sig) is True
+
+    def test_powershell_is_lolbin(self):
+        r = _make_responder()
+        sig = _make_signal(metadata={"process": "powershell.exe"})
+        assert r._is_lolbin_signal(sig) is True
+
+    def test_cmd_is_lolbin(self):
+        r = _make_responder()
+        sig = _make_signal(metadata={"process": "cmd.exe"})
+        assert r._is_lolbin_signal(sig) is True
+
+    def test_wmic_is_lolbin(self):
+        r = _make_responder()
+        sig = _make_signal(metadata={"process": "wmic.exe"})
+        assert r._is_lolbin_signal(sig) is True
+
+    def test_regular_process_is_not_lolbin(self):
+        r = _make_responder()
+        sig = _make_signal(metadata={"process": "notepad.exe"})
+        assert r._is_lolbin_signal(sig) is False
+
+    def test_empty_process_metadata_is_not_lolbin(self):
+        r = _make_responder()
+        sig = _make_signal(metadata={})
+        assert r._is_lolbin_signal(sig) is False
+
+    def test_lolbin_check_is_case_insensitive(self):
+        r = _make_responder()
+        sig = _make_signal(metadata={"process": "VSSADMIN.EXE"})
+        assert r._is_lolbin_signal(sig) is True
+
+
+# ---------------------------------------------------------------------------
+# _extract_pid and _extract_parent_pid
+# ---------------------------------------------------------------------------
+
+class TestExtractPid:
+    def _r(self):
+        return _make_responder()
+
+    def test_extract_pid_from_pid_key(self):
+        r = self._r()
+        sig = _make_signal(metadata={"pid": 42})
+        assert r._extract_pid(sig) == 42
+
+    def test_extract_pid_from_ProcessId_key(self):
+        r = self._r()
+        sig = _make_signal(metadata={"ProcessId": 99})
+        assert r._extract_pid(sig) == 99
+
+    def test_extract_pid_from_child_pid_key(self):
+        r = self._r()
+        sig = _make_signal(metadata={"child_pid": 77})
+        assert r._extract_pid(sig) == 77
+
+    def test_extract_pid_returns_none_when_missing(self):
+        r = self._r()
+        sig = _make_signal(metadata={})
+        assert r._extract_pid(sig) is None
+
+    def test_extract_pid_ignores_zero(self):
+        r = self._r()
+        sig = _make_signal(metadata={"pid": 0})
+        assert r._extract_pid(sig) is None
+
+    def test_extract_pid_ignores_negative(self):
+        r = self._r()
+        sig = _make_signal(metadata={"pid": -1})
+        assert r._extract_pid(sig) is None
+
+
+class TestExtractParentPid:
+    def _r(self):
+        return _make_responder()
+
+    def test_extract_parent_pid_from_ppid_key(self):
+        r = self._r()
+        sig = _make_signal(metadata={"ppid": 1000})
+        assert r._extract_parent_pid(sig) == 1000
+
+    def test_extract_parent_pid_from_parent_pid_key(self):
+        r = self._r()
+        sig = _make_signal(metadata={"parent_pid": 2000})
+        assert r._extract_parent_pid(sig) == 2000
+
+    def test_extract_parent_pid_from_ParentProcessId_key(self):
+        r = self._r()
+        sig = _make_signal(metadata={"ParentProcessId": 3000})
+        assert r._extract_parent_pid(sig) == 3000
+
+    def test_extract_parent_pid_returns_none_when_missing(self):
+        r = self._r()
+        sig = _make_signal(metadata={"pid": 100})
+        assert r._extract_parent_pid(sig) is None
+
+
+# ---------------------------------------------------------------------------
+# actions() — history recording
+# ---------------------------------------------------------------------------
+
+class TestActionsHistory:
+    def test_actions_returns_list_of_dicts(self):
+        engine = _make_engine()
+        r = _make_responder(engine=engine, mode=ResponderMode.OFF)
+        r._lookup = lambda pid: ("notepad.exe", "notepad.exe", r"C:\Windows\notepad.exe")
+        r._respond_to_pid(12345, "test_reason")
+        actions = r.actions()
+        assert isinstance(actions, list)
+        assert len(actions) == 1
+        assert isinstance(actions[0], dict)
+
+    def test_actions_limit_parameter_caps_result(self):
+        engine = _make_engine()
+        r = _make_responder(engine=engine, mode=ResponderMode.OFF)
+        r._lookup = lambda pid: ("app.exe", "app.exe", r"C:\app.exe")
+        for i in range(10):
+            r._respond_to_pid(i + 1000, "reason")
+        assert len(r.actions(limit=3)) == 3
+
+
+# ---------------------------------------------------------------------------
+# ESCALATE_CHILD_NAMES set
+# ---------------------------------------------------------------------------
+
+class TestEscalateChildNames:
+    def test_vssadmin_in_escalate_set(self):
+        assert "vssadmin.exe" in ESCALATE_CHILD_NAMES
+
+    def test_powershell_in_escalate_set(self):
+        assert "powershell.exe" in ESCALATE_CHILD_NAMES
+
+    def test_wbadmin_in_escalate_set(self):
+        assert "wbadmin.exe" in ESCALATE_CHILD_NAMES
+
+    def test_bcdedit_in_escalate_set(self):
+        assert "bcdedit.exe" in ESCALATE_CHILD_NAMES
+
+
+# ---------------------------------------------------------------------------
+# PATH_VERIFIED set
+# ---------------------------------------------------------------------------
+
+class TestPathVerified:
+    def test_svchost_in_path_verified(self):
+        assert "svchost.exe" in PATH_VERIFIED
+
+    def test_csrss_in_path_verified(self):
+        assert "csrss.exe" in PATH_VERIFIED
+
+    def test_lsass_in_path_verified(self):
+        assert "lsass.exe" in PATH_VERIFIED
+
+    def test_python_not_in_path_verified(self):
+        """python.exe is in NEVER_KILL but not PATH_VERIFIED → no path check needed."""
+        assert "python.exe" not in PATH_VERIFIED
+
+
+# ---------------------------------------------------------------------------
+# Windows-only kill tests (psutil required)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.windows
+class TestKillWithPsutil:
+    def test_kill_nonexistent_pid_does_not_raise(self):
+        psutil = pytest.importorskip("psutil")
+        engine = _make_engine()
+        r = ProcessResponder(engine, mode=ResponderMode.KILL)
+        # PID 999999 almost certainly does not exist
+        action = r._respond_to_pid(999999, "test")
+        # Should record an action (error or not) without raising
+        assert action is not None

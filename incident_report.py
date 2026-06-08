@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import Deque, Dict, List, Optional
 
 from scoring import ScoringEngine, Signal, ENCRYPTION_SIGNAL_NAMES
+import attack_map
 
 # Native desktop notifications are *best effort* and purely advisory: the
 # authoritative record is the markdown report + the dashboard.  When an
@@ -486,6 +487,39 @@ def _signame_from_reason(reason: Optional[str]) -> str:
     parts = (reason or "").split("/", 1)
     sig = parts[1] if len(parts) > 1 else (parts[0] if parts else "")
     return sig.split()[0] if sig else ""
+
+
+def _attack_lines(reason: Optional[str], pid_signals: List["Signal"]) -> List[str]:
+    """차단 사유 + 이 PID 의 신호들에서 MITRE ATT&CK 기법을 모아 표로 만든다.
+
+    표준 분류체계라 SOC/IR 가 외부 SIEM·EDR 룰, 위협 인텔, 플레이북과 곧바로
+    매핑할 수 있다.  매핑이 없으면 섹션을 비우지 않고 안내 한 줄만 남긴다.
+    """
+    names = {_signame_from_reason(reason)}
+    for s in pid_signals:
+        names.add(s.name)
+    # 기법 ID -> (Technique dict, 그 기법을 유발한 전술 한국어)
+    seen: Dict[str, dict] = {}
+    for nm in names:
+        for t in attack_map.techniques_for(nm):
+            seen.setdefault(t.tid, t.to_dict())
+
+    out: List[str] = []
+    out.append("## 공격 기법 (MITRE ATT&CK)")
+    out.append("")
+    if not seen:
+        out.append("- 이 사건의 신호에 매핑된 표준 기법이 없습니다.")
+        out.append("")
+        return out
+    out.append("> 이 사건에서 관측된 행위를 국제 표준 분류(MITRE ATT&CK)로 정리했습니다. "
+               "보안팀이 외부 보안 솔루션·위협 인텔과 대조할 때 사용하세요.")
+    out.append("")
+    out.append("| 기법 ID | 이름 | 전술(목적) |")
+    out.append("|---|---|---|")
+    for t in sorted(seen.values(), key=lambda d: d["id"]):
+        out.append(f"| [{t['id']}]({t['url']}) | {t['name']} | {t['tactic_ko']} ({t['tactic']}) |")
+    out.append("")
+    return out
 
 
 # ---- 피해 범위 추정 ------------------------------------------------------
@@ -976,6 +1010,9 @@ class IncidentReporter:
         lines.append(f"- **현재 위험 점수(최근 120초 누적):** {score} (150 이상이면 자동 차단)")
         lines.append(f"- **판정된 위협 수준:** **{_ko_severity(level)}** ({level})")
         lines.append("")
+
+        # 표준 위협 분류(MITRE ATT&CK) — SOC/IR 가 외부 룰·인텔과 매핑하도록.
+        lines.extend(_attack_lines(action.reason, pid_signals))
 
         lines.append("## 피해 범위 (이 프로그램이 건드린 파일)")
         lines.append("")

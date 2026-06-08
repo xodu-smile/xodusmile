@@ -162,12 +162,19 @@ class ProcessResponder:
                  mode: ResponderMode = ResponderMode.KILL,
                  minifilter=None,
                  critical_threshold: int = THRESHOLD_CRITICAL,
-                 on_action: Optional[Callable[[KillAction], None]] = None):
+                 on_action: Optional[Callable[[KillAction], None]] = None,
+                 allowlist=None):
         self.engine = engine
         self.mode = mode
         self.minifilter = minifilter
         self.critical_threshold = critical_threshold
         self._on_action = on_action
+        # Operator allowlist (allowlist.Allowlist | None).  A PID whose verified
+        # image is allowlisted is treated as never-kill — a trusted third-party
+        # app (backup/sync/build tooling) the admin explicitly exempted must not
+        # be terminated even if its bulk file activity scores.  Path-prefix
+        # entries also defeat name spoofing.  Left None → no allowlist behaviour.
+        self.allowlist = allowlist
         self._lock = threading.Lock()
         self._actions: List[KillAction] = []
         self._already_killed: Set[int] = set()
@@ -179,6 +186,20 @@ class ProcessResponder:
     def attach(self) -> None:
         """Subscribe to the scoring engine.  Idempotent."""
         self.engine.subscribe(self._dispatch)
+
+    def set_mode(self, mode: ResponderMode) -> ResponderMode:
+        """Change the responder mode at runtime (admin control).
+
+        Returns the new mode.  Switching to a less aggressive mode does not
+        revive already-terminated processes; switching to a more aggressive
+        one only affects *future* signals — we never retro-kill on a mode bump.
+        """
+        if not isinstance(mode, ResponderMode):
+            mode = ResponderMode(str(mode))
+        with self._lock:
+            self.mode = mode
+        print(f"[responder] mode changed to {mode.value}")
+        return mode
 
     def actions(self, limit: int = 50) -> List[dict]:
         with self._lock:
@@ -286,6 +307,16 @@ class ProcessResponder:
         if self._is_never_kill(proc_name, exe_path):
             return self._noop(pid, reason,
                               f"{proc_name!r} is on the never-kill list")
+        # Operator allowlist: a verified-image match means the admin explicitly
+        # trusts this app.  Check by PID (verifies the on-disk image, so a
+        # %TEMP%\veeamagent.exe impostor against a path-prefix entry won't pass).
+        if self.allowlist is not None:
+            try:
+                if self.allowlist.pid_allowed(pid):
+                    return self._noop(pid, reason,
+                                      f"{proc_name or pid!r} is on the operator allowlist")
+            except Exception as e:
+                print(f"[responder] allowlist check error: {e}")
         if not proc_name and name_hint:
             proc_name = name_hint
         if not cmdline and cmd_hint:

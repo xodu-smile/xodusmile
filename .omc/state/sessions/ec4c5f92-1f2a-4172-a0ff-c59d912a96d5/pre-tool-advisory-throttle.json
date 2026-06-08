@@ -1,0 +1,46 @@
+{
+  "version": 1,
+  "entries": {
+    "445ed27a3872b681d98190bae61ccb84954e1bc4e140df5370be958dee776b3a": {
+      "last_emitted_at_ms": 1780940555558,
+      "message": "Verify changes work after editing. Test functionality before marking complete."
+    },
+    "1bb6914bc42b891c26d46c8ae2fd4f44071f59862e89dc550f4c82877b700216": {
+      "last_emitted_at_ms": 1780940488442,
+      "message": "The boulder never stops. Continue until all tasks complete."
+    },
+    "466399dafa2d20f60587180bad0a07358eb7f2bce724df0ff682f038ad33f5ad": {
+      "last_emitted_at_ms": 1780940485992,
+      "message": "Read multiple files in parallel when possible for faster analysis."
+    },
+    "79a93d4a2f8f50b95f852280616242fee1855dc99a3c75211917f55e72e95fae": {
+      "last_emitted_at_ms": 1780940431780,
+      "message": "Use parallel execution for independent tasks. Use run_in_background for long operations (npm install, builds, tests)."
+    },
+    "79f598d23c543c62f124fd39407c2d8ccff58619fa45ba97f32f59a3c07a5913": {
+      "last_emitted_at_ms": 1780940119017,
+      "message": "Spawning agent: oh-my-claudecode:code-reviewer (inherit) | Task: Code review of changes"
+    },
+    "af251c2a1c86b97c9796b2b5ca1800d6ba688631bd62441e47bf01a8b63e4751": {
+      "last_emitted_at_ms": 1780940109756,
+      "message": "Spawning agent: oh-my-claudecode:security-reviewer (inherit) | Task: Security review of changes"
+    },
+    "f3d04e37b9dba031014b3bb35cb3834982e5029f7092a4fef8ced02ab24c9059": {
+      "last_emitted_at_ms": 1780939662303,
+      "message": "Spawning agent: oh-my-claudecode:writer (inherit) [BACKGROUND] | Task: Update README and docs"
+    },
+    "032d57c4e366230662f9f355743d96dc996bc12aea8b96c703e7b2107e113b0a": {
+      "last_emitted_at_ms": 1780939625528,
+      "message": "Spawning agent: oh-my-claudecode:test-engineer (inherit) [BACKGROUND] | Task: Write Windows pytest suite"
+    },
+    "c57915ea61b7cd6d722443fd3e21a561d3c89572699fd816736915ead6160a22": {
+      "last_emitted_at_ms": 1780938486550,
+      "message": "Spawning agent: Explore (inherit) | Task: Map responder, UI & docs"
+    },
+    "9a8f10f49b0a508200cecbe03890bb78d036fd2cce6a827b21982ba662c39390": {
+      "last_emitted_at_ms": 1780938481800,
+      "message": "Spawning agent: Explore (inherit) | Task: Map detection & scoring logic"
+    }
+  },
+  "updated_at": "2026-06-08T17:42:35.558Z"
+}

@@ -463,8 +463,207 @@ def gen_process():
     print("wrote", out)
 
 
+# =============================================================
+# 5. IA — 정보 구조 (Information Architecture)
+# =============================================================
+def gen_ia():
+    fig, ax = plt.subplots(figsize=(20, 13))
+    ax.set_xlim(0, 20)
+    ax.set_ylim(0, 13)
+    ax.axis("off")
+    ax.set_title("RansomGuard EDR — 정보 구조 (Information Architecture)",
+                 fontsize=16, fontweight="bold", pad=14)
+
+    # Root
+    box(ax, 8.3, 11.9, 3.4, 0.8, "RansomGuard EDR\n정보 체계",
+        fc="#1A73E8", ec="#0B47A1", fontsize=11.5, fontweight="bold", text_color="white")
+
+    # 4 top-level areas
+    areas = [
+        ("A. 대시보드 (Web UI)\nhttp://127.0.0.1:5000", 0.6, 10.0, "#E8F0FE", "#1A73E8"),
+        ("B. API / 인터페이스\n/api/* · 커널 포트", 5.5, 10.0, "#FEF7E0", "#F9AB00"),
+        ("C. 데이터 엔티티\nSignal · Action · Incident", 10.4, 10.0, "#E6F4EA", "#188038"),
+        ("D. 산출물 / 저장소\nDB · 리포트 · 문서", 15.3, 10.0, "#F3E8FD", "#8430CE"),
+    ]
+    for txt, x, y, fc, ec in areas:
+        box(ax, x, y, 4.1, 0.9, txt, fc=fc, ec=ec, fontsize=9.5, fontweight="bold")
+        arrow(ax, 10, 11.88, x + 2.05, y + 0.9, color="#9AA0A6")
+
+    # A. Dashboard navigation tree
+    a_items = [
+        "A1  위협 점수 게이지 (0~300+)",
+        "A2  심각도 배지 INFO~CRITICAL",
+        "A3  최근 시그널 테이블",
+        "A4  프로세스 스냅샷 목록",
+        "A5  리스폰더 액션 로그",
+        "A6  인시던트 리포트 뷰어",
+        "A7  수동 Kill / Release 컨트롤",
+        "A8  토스트 알림 영역",
+    ]
+    for i, t in enumerate(a_items):
+        y = 9.2 - i * 0.62
+        box(ax, 0.6, y, 4.1, 0.5, t, fc="white", ec="#1A73E8", fontsize=8.3)
+
+    # B. API tree
+    b_items = [
+        "GET  /api/status   점수·레벨·통계",
+        "GET  /api/events   최근 100 시그널",
+        "GET  /api/processes  psutil 스냅샷",
+        "GET  /api/actions  대응 이력",
+        "GET  /api/reports[/<file>]  리포트",
+        "GET  /api/heartbeat  생존 신호",
+        "POST /api/kill · /api/release",
+        "POST /api/reset    윈도우 초기화",
+        "포트  \\RansomGuardPort (RG_EVENT/CMD)",
+        "WMI  Win32_Process 구독",
+    ]
+    for i, t in enumerate(b_items):
+        y = 9.2 - i * 0.62
+        box(ax, 5.5, y, 4.1, 0.5, t, fc="white", ec="#F9AB00", fontsize=8.0)
+
+    # C. Data entities
+    c_items = [
+        "Signal {detector,name,weight,",
+        "        severity,message,meta,ts}",
+        "Score {value, level, window=120s}",
+        "KillAction {pid,name,mode,reason}",
+        "Incident {ts, pid, timeline, action}",
+        "Process {pid, name, cpu, mem, io}",
+        "QuarantinePid[256] / ProtectedPid[16]",
+        "ActorTrust {FULL/REG_ONLY/UNTRUSTED}",
+        "Rule {pattern, weight, severity}",
+    ]
+    for i, t in enumerate(c_items):
+        y = 9.2 - i * 0.62
+        fc = "#F5FBF7" if i in (0, 1) else "white"
+        box(ax, 10.4, y, 4.1, 0.5, t, fc=fc, ec="#188038", fontsize=7.8)
+
+    # D. Artifacts / storage
+    d_items = [
+        "detector.db  (SQLite signals)",
+        "reports/incident_*.md",
+        "canary 5종 (watch 디렉터리)",
+        ".lab.json  (랩 설정)",
+        "docs/deliverables/*.md + images/",
+        "docs/WIKI.ko.md · WIKI.en.md",
+        "README.md · README.en.md",
+        "콘솔 로그 · 액션 이력(1000 cap)",
+    ]
+    for i, t in enumerate(d_items):
+        y = 9.2 - i * 0.62
+        box(ax, 15.3, y, 4.1, 0.5, t, fc="white", ec="#8430CE", fontsize=8.0)
+
+    # Bottom note: navigation relationship
+    box(ax, 0.6, 0.4, 18.8, 1.5,
+        "탐색 흐름:  탐지기 → Signal 생성 → ScoringEngine 누적 → (A 대시보드 폴링 / C 엔티티 갱신 / D DB·리포트 영구화)\n"
+        "권한:  대시보드는 localhost 전용(무인증) · 산출물 디렉터리는 DACL 로 SYSTEM/Admins 만 접근",
+        fc="#FAFAFA", ec="#DADCE0", fontsize=9.5, fontweight="normal")
+
+    plt.tight_layout()
+    out = os.path.join(OUT, "05_ia.png")
+    plt.savefig(out, dpi=140, bbox_inches="tight", facecolor="white")
+    plt.close(fig)
+    print("wrote", out)
+
+
+# =============================================================
+# 6. 아키텍처 — 계층형 컴포넌트 / 배포 구조
+# =============================================================
+def gen_architecture():
+    fig, ax = plt.subplots(figsize=(20, 13))
+    ax.set_xlim(0, 20)
+    ax.set_ylim(0, 13)
+    ax.axis("off")
+    ax.set_title("RansomGuard EDR — 프로젝트 아키텍처 (계층 / 컴포넌트)",
+                 fontsize=16, fontweight="bold", pad=12)
+
+    # Layer band helper
+    def band(y, h, label, fc):
+        ax.add_patch(FancyBboxPatch((0.3, y), 19.4, h,
+                     boxstyle="round,pad=0.02,rounding_size=0.06",
+                     facecolor=fc, edgecolor="#DADCE0", linewidth=0.9))
+        ax.text(0.55, y + h - 0.28, label, fontsize=10.5, fontweight="bold", color="#202124")
+
+    # --- L5 사용자/운영 ---
+    band(11.2, 1.4, "운영 / 사용자 계층", "#E0F7FA")
+    box(ax, 2.0, 11.35, 3.4, 0.9, "관리자\n대시보드 · 수동 대응", fc="white", ec="#00838F", fontsize=9)
+    box(ax, 7.0, 11.35, 3.4, 0.9, "사용자\nOS 토스트 알림", fc="white", ec="#00838F", fontsize=9)
+    box(ax, 12.0, 11.35, 4.2, 0.9, "PowerShell 운영 스크립트\nbootstrap/install/lab.ps1", fc="white", ec="#00838F", fontsize=8.7)
+
+    # --- L4 가시화/보고 ---
+    band(9.2, 1.6, "가시화 · 보고 계층 (User Mode)", "#F3E8FD")
+    box(ax, 2.0, 9.35, 4.0, 1.0, "Flask Dashboard\ndashboard/app.py (/api/*)", fc="white", ec="#8430CE", fontsize=9)
+    box(ax, 7.0, 9.35, 4.0, 1.0, "IncidentReporter\nincident_report.py (MD+알림)", fc="white", ec="#8430CE", fontsize=8.8)
+    box(ax, 12.0, 9.35, 4.2, 1.0, "EventStore\nevent_store.py (SQLite)", fc="white", ec="#8430CE", fontsize=9)
+
+    # --- L3 판단/대응 ---
+    band(7.0, 1.8, "판단 · 대응 계층 (User Mode)", "#E6F4EA")
+    box(ax, 2.0, 7.15, 4.0, 1.1, "ScoringEngine\nscoring.py\n120s 윈도우 · 4단계 임계", fc="white", ec="#188038", fontsize=8.8, fontweight="bold")
+    box(ax, 7.0, 7.15, 4.0, 1.1, "ProcessResponder\nresponder.py\nOFF/QUARANTINE/KILL", fc="white", ec="#188038", fontsize=8.8, fontweight="bold")
+    box(ax, 12.0, 7.15, 2.4, 1.1, "actor_trust.py\n신뢰 분류", fc="white", ec="#188038", fontsize=8.5)
+    box(ax, 14.7, 7.15, 1.6, 1.1, "tamper.py\n자가방어", fc="white", ec="#188038", fontsize=8.5)
+
+    # --- L2 탐지 ---
+    band(4.4, 2.2, "탐지 계층 (Detectors / User Mode)", "#FEF7E0")
+    dets = [
+        ("CanaryDetector\ncanary.py", 1.7),
+        ("MassIODetector\nmass_io.py", 4.8),
+        ("ProcessCmdline\nprocess_cmdline.py", 7.9),
+        ("ProcessWatcher\nprocess_watcher.py", 11.0),
+        ("Process/Registry\nKernel detectors", 14.1),
+        ("MinifilterBridge\nminifilter_bridge.py", 17.0),
+    ]
+    for txt, x in dets:
+        box(ax, x, 4.6, 2.6, 1.4, txt, fc="white", ec="#F9AB00", fontsize=8.3)
+
+    # --- L1 커널 ---
+    band(2.0, 2.0, "커널 계층 (Kernel Mode Driver)", "#FCE8E6")
+    box(ax, 2.0, 2.2, 4.4, 1.4,
+        "RansomGuard.sys\nminifilter/RansomGuard.c\nIRP Create/Write/SetInfo 콜백", fc="white", ec="#D93025", fontsize=8.5, fontweight="bold")
+    box(ax, 7.2, 2.2, 4.4, 1.4,
+        "프로세스/레지스트리/핸들 콜백\nPsSet../CmRegister../ObRegister..", fc="white", ec="#D93025", fontsize=8.3)
+    box(ax, 12.4, 2.2, 4.4, 1.4,
+        "격리 PID 비트맵[256]\nWrite/Rename 차단\nSTATUS_ACCESS_DENIED", fc="white", ec="#D93025", fontsize=8.3, fontweight="bold")
+
+    # --- L0 OS/HW ---
+    band(0.4, 1.2, "플랫폼", "#ECEFF1")
+    box(ax, 2.0, 0.5, 6.0, 0.85, "Windows 11 (22H2+) x64 / ARM64 · NTFS 파일시스템",
+        fc="white", ec="#607D8B", fontsize=9)
+    box(ax, 9.0, 0.5, 4.0, 0.85, "Filter Manager (FltMgr)",
+        fc="white", ec="#607D8B", fontsize=9)
+    box(ax, 13.5, 0.5, 4.3, 0.85, "Python 3.10+ · pywin32 · psutil",
+        fc="white", ec="#607D8B", fontsize=8.8)
+
+    # Vertical data-flow arrows (kernel -> up)
+    arrow(ax, 4.2, 3.6, 4.2, 4.6, color="#D93025", lw=1.6)          # kernel -> detector(bridge area)
+    arrow(ax, 18.3, 4.6, 14.6, 3.6, color="#D93025", lw=1.4)        # bridge col -> kernel
+    ax.text(15.6, 3.95, "RG_EVENT", fontsize=7.5, color="#D93025")
+    for x in [3.0, 6.1, 9.2, 12.3, 15.4, 18.3]:
+        arrow(ax, x, 4.6, 4.0, 7.05 if x < 11 else 8.0, color="#9AA0A6", lw=0.9)
+    arrow(ax, 6.0, 7.7, 7.0, 7.7, color="#188038", lw=1.5)          # scoring -> responder
+    ax.text(6.05, 8.0, "score/level", fontsize=7.5, color="#188038")
+    arrow(ax, 9.0, 8.25, 4.0, 9.35, color="#188038", lw=1.2)        # responder -> reporter/event
+    arrow(ax, 9.0, 8.25, 9.0, 9.35, color="#188038", lw=1.2)
+    arrow(ax, 9.0, 7.15, 9.0, 3.6, color="#188038", style="-|>", lw=1.6)  # responder -> kernel quarantine
+    ax.text(9.1, 5.4, "Quarantine /\nTerminate", fontsize=7.5, color="#188038", fontweight="bold")
+    arrow(ax, 4.0, 10.35, 3.7, 11.35, color="#8430CE", lw=1.2)      # dashboard -> admin
+    arrow(ax, 9.0, 10.35, 8.7, 11.35, color="#8430CE", lw=1.2)      # reporter -> user
+
+    ax.text(0.55, 12.7,
+            "데이터 흐름: 커널 콜백 → MinifilterBridge → 탐지기 Signal → ScoringEngine 누적 → Responder(격리/종료) → EventStore/Reporter → 대시보드/사용자",
+            fontsize=8.3, color="#5F6368")
+
+    plt.tight_layout()
+    out = os.path.join(OUT, "06_architecture.png")
+    plt.savefig(out, dpi=140, bbox_inches="tight", facecolor="white")
+    plt.close(fig)
+    print("wrote", out)
+
+
 if __name__ == "__main__":
     gen_features()
     gen_asis()
     gen_wbs()
     gen_process()
+    gen_ia()
+    gen_architecture()

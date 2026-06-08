@@ -341,6 +341,27 @@ True)` 가 가중치를 1.5배 한다.
 
 ---
 
+### 4.3b `detectors/ransom_note.py`
+
+협박문(ransom note) 탐지기. 감시 폴더를 2초마다 폴링해서 암호화 후
+랜섬웨어가 각 폴더에 떨어뜨리는 협박문 파일을 감지한다.
+
+| 항목 | 설명 |
+|------|------|
+| `NOTE_PATTERNS` | 정규식 목록 — `how.*to.*decrypt`, `recover.*files`, `your.*files.*encrypted`, `ransom.*note`, `_readme.txt`, 등 특이도 높은 패턴. |
+| `SPREAD_DIR_THRESHOLD = 2` | 이 개 이상 *서로 다른* 디렉터리에서 노트가 나오면 spread. |
+| `SPREAD_WINDOW_SEC = 60` | 이 시간 내에 모인 노트만 spread 로 집계. |
+| `W_NOTE_SINGLE = 35` | 단일 협박문 가중치 (HIGH). |
+| `W_NOTE_SPREAD = 90` | 다중 디렉터리 spread 가중치 (CRITICAL). |
+| `RansomNoteDetector.run()` | 1차: baseline scan (기존 파일 무시); 이후 폴링에서 새 노트 감지 시 `_handle_note()`. |
+| `_handle_note(path, now)` | 노트 경로를 `_recent_dirs` dict에 추가 → spread count 판정. spread ≥ 2 이면 `ransom_note_spread` (CRITICAL), 아니면 `ransom_note_dropped` (HIGH, 또는 canary 부스트 중이면 CRITICAL). |
+| `_on_engine_signal(sig, score, level)` | canary 신호 구독 — canary 트립 시 30초 내 단일 노트도 CRITICAL로 강화. |
+
+크로스 시그널: `canary` 트립이 감지되면 `_boost_active()` 가 True 반환해서
+단일 노트도 `ransom_note_dropped` 대신 CRITICAL로 발화 (weight W_NOTE_SPREAD).
+
+---
+
 ### 4.4 `detectors/process_cmdline.py`
 
 Win11 전용 WMI 프로세스 생성 구독자. 각 새 프로세스는 `RULES` —
@@ -413,7 +434,55 @@ LOLBin 체인 탐지, 단일 프로세스 I/O 버스트, 대시보드 프로세�
 
 ---
 
-### 4.7 `detectors/process_kernel.py`
+### 4.7 `allowlist.py`
+
+운영자 신뢰 목록. 정상 백업/압축/동기화 소프트웨어를 **프로세스 이름** 또는
+**이미지 경로 접두사**로 명시 등록해서 점수 가산 및 자동 종료를 면제한다.
+
+| 항목 | 설명 |
+|------|------|
+| `AllowEntry(kind, value, note, added_at)` | 개별 항목. `kind` = `"name"` (프로세스 basename, 소문자) 또는 `"path"` (이미지 경로 접두사, 소문자 정규화). |
+| `Allowlist(path="allowlist.json", autoload=True)` | 메인 클래스. 영속화는 JSON, 로드 시 `load()` (중복 제거), 편집 시 `add/remove()` 후 `save()`. |
+| `add(value, kind="", note="")` | 항목 추가 (중복 무시), 영속화. |
+| `remove(value, kind="")` | 항목 제거, 영속화. |
+| `entries()` | 전체 항목 dict 리스트. |
+| `pid_allowed(pid)` | PID 의 검증된 이미지(exe path) 또는 basename 이 허용 목록과 일치하는지. `psutil` 로 PID → 경로/이름 조회, fail-closed (경로 불가 시 False). PID 재사용 방어용 create_time 캐시. |
+| `signal_exempt(sig)` | scoring trust classifier 용. 허용 PID 가 낸 신호는 점수에서 면제. **단, `_NEVER_EXEMPT_SIGNALS` 에 든 고신뢰 신호 (canary, ransom_note_spread, defender_self_disable)는 면제 안 함.** |
+| `matches(name, exe_path)` | 이름/경로가 허용 항목과 일치하는지 (PID 조회 없이). |
+| `combine_trust(*classifiers)` | 여러 trust 함수를 OR 로 합성. `actor_trust.signal_actor_trusted` + `allowlist.signal_exempt` 통합 시 사용. |
+
+**설계 철학**: 경로 기반 항목이 이름 위장(`%TEMP%\veeamagent.exe` 같은 가짜)을 방어하지만,
+이름 항목만으로는 못 방어하므로, 관리자가 실수로 악성코드를 허용하는 사태를 막도록
+canary/협박문확산 같은 단발 고신뢰 신호는 허용 목록으로도 면제 불가.
+
+---
+
+### 4.8 `attack_map.py`
+
+모든 탐지 신호를 **MITRE ATT&CK 기법 ID**에 매핑하는 순수 데이터 + 조회.
+
+| 함수 | 용도 |
+|------|------|
+| `Technique(tid, name, tactic, tactic_ko, url)` | 기법 정의. 예: `T1486 Data Encrypted for Impact`. |
+| `techniques_for(signal_name)` | 신호 이름 → 매핑된 기법 리스트. 없으면 빈 리스트. |
+| `technique_dicts_for(signal_name)` | 직렬화 형태 (dict 리스트). 대시보드/보고서용. |
+| `primary_technique(signal_name)` | 첫 번째 기법만 (뱃지 1개 표시용). |
+| `annotate_signal_dict(sig_dict)` | Signal dict 에 `attack` 키(기법 목록) 추가. 표시 계층 전용. |
+| `label_for(signal_name)` | 한 줄 요약: `"T1490 Inhibit System Recovery (+1)"` 형태. |
+
+**매핑 예**:
+- `high_entropy_write`, `canary_modified` → `T1486 Data Encrypted for Impact`
+- `vssadmin_delete_shadows` → `T1490 Inhibit System Recovery`
+- `defender_disable_realtime` → `T1562.001 Impair Defenses` + `T1489 Service Stop`
+- `wevtutil_clear_log` → `T1070.001 Indicator Removal: Clear Windows Event Logs`
+- `schtasks_persistence` → `T1053.005 Scheduled Task/Job`
+- `powershell_downloader` → `T1059.001 PowerShell` + `T1105 Ingress Tool Transfer`
+
+대시보드 및 보고서가 이 매핑을 사용해서 SOC/IR 팀과 표준 기법명으로 소통.
+
+---
+
+### 4.9 `detectors/process_kernel.py`
 
 `MinifilterBridge` 의 `PROCESS_START`/`PROCESS_EXIT` 이벤트
 (`PsSetCreateProcessNotifyRoutineEx` 출처) 를 구독해서 WMI 없이 프로세스
@@ -436,7 +505,7 @@ LOLBin 체인 탐지, 단일 프로세스 I/O 버스트, 대시보드 프로세�
 
 ---
 
-### 4.8 `detectors/registry_kernel.py`
+### 4.12 `detectors/registry_kernel.py`
 
 `MinifilterBridge` 의 `REGISTRY` 이벤트 (`CmRegisterCallbackEx` 출처)
 를 구독. 드라이버가 watch 리스트로 미리 필터해서 올려보내므로,
@@ -473,6 +542,18 @@ LOLBin 체인 탐지, 단일 프로세스 I/O 버스트, 대시보드 프로세�
 | `/api/release` | POST `{pid}` | `responder.manual_release`. |
 | `/api/reports` | GET | `incident_reporter.recent(100)`. |
 | `/api/reports/<filename>` | GET | Raw markdown 본문 (`text/markdown`), 미존재/트래버설 시 404. |
+| `/api/admin/health` | GET | 시스템 상태 snapshot (responder mode, 드라이버 연결, uptime, 감시 폴더, 허용 목록 개수). |
+| `/api/admin/mode` | POST `{mode:"off\|quarantine\|kill"}` | Responder 모드 변경 (실시간). |
+| `/api/admin/threats` | GET | PID 별 위협 분석 (각 프로세스가 낸 신호 + ATT&CK 기법 + 점수 기여도). |
+| `/api/admin/allowlist` | GET | 허용 목록 전체 항목 (name, path, note, added_at). |
+| `/api/admin/allowlist` | POST `{value, kind:"name\|path", note?}` | 허용 목록 항목 추가. |
+| `/api/admin/allowlist` | DELETE `{value, kind:"name\|path"}` | 허용 목록 항목 삭제. |
+
+**관리자 패널** — Flask UI 내 새 collapsible 섹션 "관리자 패널 (Administrator)":
+- **시스템 상태** — responder mode (off/quarantine/kill), minifilter 연결 상태, uptime, 감시 폴더 목록, 허용 목록 항목 수.
+- **모드 전환** — POST `/api/admin/mode` 로 on-the-fly mode 변경 (재시작 불필요).
+- **PID 별 위협 분석** — 어느 프로세스가 점수를 올렸는지, 각 신호의 ATT&CK 기법, 기여도 합산.
+- **허용 목록 편집** — UI 폼으로 항목 추가/제거 (또는 `allowlist.json` 수동 편집 + reload).
 
 `create_app(agent)` 가 팩토리. 에이전트 스레드가
 `use_reloader=False` 로 Flask 서버를 띄운다.

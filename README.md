@@ -19,10 +19,14 @@ Windows 11용 **랜섬웨어 전용 소형 EDR** 입니다.
 |---|---|
 | **커널 미니필터** | `minifilter/RansomGuard.sys` 드라이버가 모든 볼륨에서 `IRP_MJ_CREATE`, `IRP_MJ_WRITE`, `IRP_MJ_SET_INFORMATION` 을 가로채요. `(pid, path, op, bytes)` 형식 이벤트를 필터 통신 포트로 사용자 모드에 스트리밍하고, 격리된 PID 의 후속 쓰기/이름변경을 **커널 안에서 차단** 합니다. |
 | **PID 단위 폭발 감지** | minifilter_bridge 가 PID 별로 쓰기 바이트와 rename 횟수를 누적해요. 짧은 시간 안에 폭증하면 어느 폴더든 상관없이 HIGH 신호 발생. |
+| **협박문 탐지** | 각 감시 폴더를 폴링해서 협박문(HOW_TO_DECRYPT.txt, _readme.txt, RESTORE-MY-FILES.txt, *.hta 등) 패턴을 찾아요. 단일 파일은 HIGH, **2개 이상 폴더에서 60초 안에 퍼지면 CRITICAL** 신호 발생. 카나리 트립 시 단일 노트도 강화. |
 | **카나리 파일** | 사용자가 절대 안 건드릴 미끼 파일을 깔아두고 해시로 감시. 변경 시 **단발로 CRITICAL** 발사. |
 | **프로세스 명령어 룰** | VSS 섀도카피 삭제, BCD 변조, Defender 비활성화, 로그 삭제, BitLocker 해제, 흔한 PowerShell 난독화 패턴 등 22개 룰. |
 | **프로세스 트리 휴리스틱** | LOLBin 부모-자식 체인(Office → PowerShell, 브라우저 → 스크립트 호스트), 한 부모가 짧은 시간 안에 자식을 다수 spawn 하는 fan-out, psutil 기반 디스크 쓰기 burst. |
 | **자동 대응 (Active Responder)** | 3가지 모드 — `off` / `quarantine` / `kill`. `kill` 모드에서 PID 가 명시된 HIGH/CRITICAL 신호가 발생하면 즉시 커널 격리 + `TerminateProcess`. **lsass, csrss 같은 시스템 핵심 프로세스는 절대 안 죽이는 하드코딩 목록** 으로 보호. |
+| **운영자 허용 목록** | 정상 백업/동기화/압축 앱(Veeam, Acronis, 7-Zip 등)을 프로세스 이름 또는 경로 접두사로 등록해서 **오탐 방지**. 카나리/협박문 확산처럼 높은 신뢰도 신호는 여전히 탐지. |
+| **MITRE ATT&CK 기법 태깅** | 모든 신호가 표준 ATT&CK 기법(T1486, T1490 등)으로 매핑. 보고서와 대시보드에 표기해서 SOC/IR 팀의 위협 인텔 연계 간편화. |
+| **관리자 대시보드 패널** | Flask UI 내 새 "관리자 패널" 섹션 — 시스템 상태(드라이버, 감시 폴더, 허용 목록), 모드 전환(off/quarantine/kill), PID 별 위협 분석(ATT&CK 기법 표시), 허용 목록 편집. |
 | **Flask 대시보드** | `http://127.0.0.1:5000` — 실시간 점수, 최근 이벤트, 프로세스 목록, 자동 대응 로그, 수동 kill/release 버튼. |
 
 ---
@@ -133,6 +137,7 @@ python agent.py --no-tamper-protection
 |---|---|
 | `--watch <dir>` | 감시할 디렉토리 (여러 번 지정 가능). 기본: `./test_watch_dir` |
 | `--mode {off,quarantine,kill}` | Responder 모드. 기본 `kill` |
+| `--allowlist <path>` | 운영자 허용 목록 JSON 파일 경로 (기본 `allowlist.json`). 신뢰하는 앱 등록으로 오탐 감소. |
 | `--no-minifilter` | 커널 다리 비활성화 (사용자 모드만 사용) |
 | `--no-dashboard` | Flask UI 시작 안 함 |
 | `--port N` | 대시보드 포트 (기본 `5000`) |
@@ -145,6 +150,8 @@ python agent.py --no-tamper-protection
 ---
 
 ## 테스트 / 검증 (Validation)
+
+### 시뮬레이터와 데모
 
 ```powershell
 # In-process 데모: 에이전트 띄우고 안전한 모의 이벤트를 자동 주입
@@ -161,6 +168,29 @@ python tests\simulator.py --scenario {populate|encrypt|canary|vss|bcd|full|steal
 
 두 도구 모두 **진짜 `vssadmin` 이나 `bcdedit` 을 실행하지 않습니다.**
 cmdline 룰은 `ProcessCmdlineDetector.submit_external` 을 통해 가짜 이벤트로만 검증됩니다.
+
+### 자동화 테스트
+
+```powershell
+# pytest 스위트 실행 (logic 레벨 단위 테스트)
+pytest
+
+# 또는 명시적으로
+python -m pytest
+```
+
+저장소 루트에 `tests/` 폴더 하에 pytest 테스트 모음이 있습니다:
+- `test_scoring.py` — 점수 엔진과 신호 가중치
+- `test_attack_map.py` — MITRE ATT&CK 기법 매핑
+- `test_allowlist.py` — 운영자 허용 목록 로직
+- `test_mass_io.py` — 엔트로피/burst 탐지기
+- `test_ransom_note.py` — 협박문 탐지기
+- `test_responder.py` — 자동 대응(격리/종료)
+- `test_incident_report.py` — 보고서 생성
+- `test_dashboard_api.py` — Flask REST API
+
+**주의**: Windows 의존 부분(psutil, WMI, Flask)은 비-Windows 에서 스킵되며,
+순수 로직 부분은 모든 플랫폼에서 동작합니다. `pytest.ini` 와 `tests/conftest.py` 참고.
 
 ---
 
@@ -290,6 +320,20 @@ Remove-Item -Recurse -Force .\.venv
 
 ---
 
+## 오탐 방지 (False Positives)
+
+RansomGuard 는 여러 계층에서 오탐을 줄이도록 설계했습니다:
+
+- **고엔트로피 데이터의 정상 포맷 제외**: `.zip`, `.rar`, `.7z`, `.jpg`, `.mp3`, `.mp4`, `.avi` 등
+  **natively high-entropy 파일**은 정적 엔트로피 신호에서 제외됩니다. 정상적인 사진 편집,
+  비디오 트랜스코딩, 아카이브 업데이트로 인한 오탐 감소.
+- **협박문 다중 디렉터리 확산 요구**: 단일 README.txt 는 HIGH, **2개 폴더 이상 60초 안에**
+  퍼져야 CRITICAL 판정 → 합법적 단일 문서 보호.
+- **운영자 허용 목록**: 백업/압축/동기화 소프트웨어를 프로세스 **이름** 또는 **경로 접두사**로 명시 등록.
+  경로 기반 등록은 이름 위장(`%TEMP%\veeamagent.exe` 같은 가짜) 방어.
+  **단, canary 트립/협박문 확산 같은 고신뢰 단발 신호는 허용 목록으로도 면제 안 됨.**
+- **신뢰 기반 점수 면제**: 시스템 정상 프로세스(Defender, WMI, servicing)는 점수 가산 제외.
+
 ## 안전 안내 (Safety)
 
 - **Responder 는 프로세스를 진짜로 종료합니다.**
@@ -300,6 +344,15 @@ Remove-Item -Recurse -Force .\.venv
   (lsass 죽이면 BSOD)
 - **시뮬레이터는 실제 사용자 데이터가 있는 머신에서 절대 돌리지 마세요.**
   더미 파일을 고엔트로피 노이즈로 덮어씁니다.
+
+---
+
+## MITRE ATT&CK 기법 매핑
+
+모든 탐지 신호는 **표준 MITRE ATT&CK 기법**(T1486, T1490 등)으로 태깅됩니다.
+대시보드 리포트와 관리자 패널에서 "T1486 Data Encrypted for Impact (임팩트)",
+"T1490 Inhibit System Recovery (복구 무력화)" 같은 **표준 공격 기법명**을 확인할 수 있어요.
+이를 통해 SOC/IR 팀이 내부 SIEM 룰, 위협 인텔, 외부 EDR 과 곧바로 연계 가능합니다.
 
 ---
 

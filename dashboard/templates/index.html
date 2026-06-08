@@ -335,6 +335,80 @@
     color: var(--ink-faint); font-size: 12px; display: flex;
     justify-content: space-between; flex-wrap: wrap; gap: 8px;
   }
+
+  /* ---------- admin panel ---------- */
+  .admin-card { border-color: #d7def0; }
+  .admin-toggle { cursor: pointer; justify-content: space-between; user-select: none; }
+  .admin-caret { color: var(--ink-faint); font-size: 12px; transition: transform .2s; }
+  .admin-caret.open { transform: rotate(180deg); }
+  .admin-body { margin-top: 6px; }
+  .admin-sec { padding: 16px 0; border-top: 1px solid var(--line-2); }
+  .admin-sec:first-child { border-top: none; padding-top: 4px; }
+  .admin-sec-title { font-size: 13px; font-weight: 700; color: var(--ink); margin-bottom: 12px; }
+
+  .health-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px,1fr)); gap: 10px; }
+  .health-item { background: var(--card-2); border: 1px solid var(--line); border-radius: 9px; padding: 10px 12px; }
+  .health-k { font-size: 11px; color: var(--ink-faint); margin-bottom: 3px; }
+  .health-v { font-size: 14px; font-weight: 700; color: var(--ink); word-break: break-word; }
+  .health-v.on  { color: var(--ok); }
+  .health-v.off { color: var(--ink-faint); }
+
+  .mode-switch { display: flex; gap: 8px; flex-wrap: wrap; }
+  .mode-btn {
+    flex: 1; min-width: 120px; border: 1px solid var(--line); background: var(--card-2);
+    color: var(--ink-dim); border-radius: 10px; padding: 11px 14px; cursor: pointer;
+    font-family: inherit; font-size: 14px; font-weight: 700; text-align: center; transition: all .15s;
+  }
+  .mode-btn small { display: block; font-size: 11px; font-weight: 500; color: var(--ink-faint); margin-top: 2px; }
+  .mode-btn:hover { border-color: var(--brand); }
+  .mode-btn.active { border-color: var(--brand); background: #eef4ff; color: var(--brand); box-shadow: var(--shadow); }
+  .mode-btn.active small { color: var(--brand); }
+  .mode-btn[data-mode="kill"].active   { border-color: var(--crit); background: #fdeded; color: var(--crit); }
+  .mode-btn[data-mode="kill"].active small { color: var(--crit); }
+
+  .threat {
+    border: 1px solid var(--line); border-left: 4px solid var(--ink-faint);
+    border-radius: 10px; padding: 11px 14px; margin-bottom: 9px; background: var(--card);
+  }
+  .threat[data-sev="CRITICAL"] { border-left-color: var(--crit); }
+  .threat[data-sev="HIGH"]     { border-left-color: var(--high); }
+  .threat[data-sev="MEDIUM"]   { border-left-color: var(--med); }
+  .threat-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+  .threat-left { display: flex; align-items: center; gap: 8px; min-width: 0; }
+  .threat-score { font-size: 17px; font-weight: 800; color: var(--ink); }
+  .threat-pid { font-size: 12px; color: var(--ink-dim); }
+  .threat-name { font-weight: 700; }
+  .att-tags { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 7px; }
+  .att-tag {
+    font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 999px;
+    background: #f0eafe; color: #6d28d9; text-decoration: none; white-space: nowrap;
+  }
+  .att-tag:hover { background: #e4d9fc; }
+  .threat-sigs { margin-top: 7px; font-size: 11.5px; color: var(--ink-dim); }
+  .threat-sigs .sig { display: inline-block; margin: 2px 8px 2px 0; }
+  .threat-kill { border: 1px solid var(--line); border-radius: 8px; padding: 5px 12px; font-size: 12px;
+    font-weight: 600; color: var(--crit); background: var(--card-2); cursor: pointer; }
+  .threat-kill:hover { background: #fdeded; border-color: var(--crit); }
+
+  .allow-add { display: flex; gap: 8px; flex-wrap: wrap; }
+  .allow-add input {
+    flex: 1; min-width: 180px; background: var(--card-2); border: 1px solid var(--line);
+    border-radius: 9px; padding: 9px 13px; font-family: inherit; font-size: 13px; color: var(--ink);
+  }
+  .allow-add input:focus { outline: none; border-color: var(--brand); background: #fff; }
+  .btn.primary { background: var(--brand); color: #fff; border-color: var(--brand); }
+  .btn.primary:hover { background: #1e40af; color: #fff; }
+  .allow-row {
+    display: flex; align-items: center; justify-content: space-between; gap: 10px;
+    border: 1px solid var(--line); border-radius: 9px; padding: 9px 13px; margin-bottom: 7px; background: var(--card);
+  }
+  .allow-row .kind { font-size: 11px; font-weight: 700; padding: 1px 7px; border-radius: 999px; background: var(--line-2); color: var(--ink-dim); }
+  .allow-row .kind.path { background: #e7f6ec; color: var(--ok); }
+  .allow-val { font-weight: 600; word-break: break-all; }
+  .allow-note { color: var(--ink-faint); font-size: 12px; }
+  .allow-del { border: 1px solid var(--line); border-radius: 8px; padding: 4px 10px; font-size: 12px;
+    color: var(--ink-dim); background: var(--card-2); cursor: pointer; white-space: nowrap; }
+  .allow-del:hover { border-color: var(--crit); color: var(--crit); background: #fdeded; }
 </style>
 </head>
 <body>
@@ -454,6 +528,56 @@
   </div>
 </div>
 
+<!-- ===== 관리자 패널 (Administrator) ===== -->
+<div class="card proc-card admin-card">
+  <div class="card-title admin-toggle" id="admin-toggle">
+    <span>🛠 관리자 패널 <span class="hint">— 시스템 상태 · 대응 모드 · 허용 목록 · 위협 분석 (Administrator)</span></span>
+    <span class="admin-caret" id="admin-caret">▼</span>
+  </div>
+  <div class="admin-body" id="admin-body" style="display:none;">
+
+    <!-- 시스템 상태 -->
+    <div class="admin-sec">
+      <div class="admin-sec-title">시스템 상태 <span class="hint">— System health</span></div>
+      <div class="health-grid" id="health-grid">
+        <div class="empty" style="padding:14px 0;">불러오는 중…</div>
+      </div>
+    </div>
+
+    <!-- 대응 모드 -->
+    <div class="admin-sec">
+      <div class="admin-sec-title">자동 대응 모드 <span class="hint">— 위협 발견 시 어떻게 조치할지</span></div>
+      <div class="mode-switch" id="mode-switch">
+        <button class="mode-btn" data-mode="off">감시만<small>조치 안 함</small></button>
+        <button class="mode-btn" data-mode="quarantine">격리<small>파일 접근만 차단</small></button>
+        <button class="mode-btn" data-mode="kill">강제 종료<small>격리 + 종료</small></button>
+      </div>
+      <div class="hint" id="mode-note" style="margin-top:8px;">현재 모드를 불러오는 중…</div>
+    </div>
+
+    <!-- PID별 위협 분석 -->
+    <div class="admin-sec">
+      <div class="admin-sec-title">위협 분석 (프로세스별) <span class="hint">— 위험 점수를 올리는 프로세스와 공격 기법(MITRE ATT&CK)</span></div>
+      <div class="scroll" style="max-height:340px;" id="threats-list">
+        <div class="empty" style="padding:14px 0;">현재 누적된 위협이 없습니다.</div>
+      </div>
+    </div>
+
+    <!-- 허용 목록 -->
+    <div class="admin-sec">
+      <div class="admin-sec-title">허용 목록 (신뢰 프로그램) <span class="hint">— 백업·동기화 등 정상 대량 작업 앱을 오탐에서 제외</span></div>
+      <div class="allow-add">
+        <input type="text" id="allow-value" placeholder="프로세스 이름(veeamagent.exe) 또는 경로(C:\Program Files\Veeam\)" autocomplete="off">
+        <input type="text" id="allow-note" placeholder="메모(선택)" autocomplete="off" style="max-width:160px;">
+        <button class="btn primary" id="allow-add-btn">추가</button>
+      </div>
+      <div class="hint" style="margin:6px 0 10px;">경로로 등록하면 같은 이름의 위장 파일(예: 임시폴더의 동일 이름)은 신뢰되지 않아 더 안전합니다.</div>
+      <div id="allow-list"><div class="empty" style="padding:10px 0;">등록된 허용 항목이 없습니다.</div></div>
+    </div>
+
+  </div>
+</div>
+
 <!-- ===== 보고서 모달 ===== -->
 <div class="modal-overlay" id="report-modal">
   <div class="modal">
@@ -568,6 +692,9 @@
         .filter(([,v]) => v !== null && v !== '')
         .map(([k,v]) => `<span class="k">${escape(k)}=</span>${escape(v)}`)
         .join(' · ');
+      const att = (e.attack || []).map(a =>
+        `<a class="att-tag" href="${escape(a.url)}" target="_blank" rel="noopener"
+            title="${escape(a.name)} · ${escape(a.tactic_ko)}">${escape(a.id)}</a>`).join('');
       return `
         <div class="event" data-sev="${escape(e.severity)}">
           <div class="event-head">
@@ -578,6 +705,7 @@
             <span class="event-time mono">${fmtTime(e.timestamp)}</span>
           </div>
           <div class="event-msg">${escape(e.message)}</div>
+          ${att ? `<div class="att-tags">${att}</div>` : ''}
           ${meta ? `<div class="event-meta mono">${meta}</div>` : ''}
         </div>`;
     }).join('');
@@ -901,6 +1029,178 @@
   }
   reportsTick();
   setInterval(reportsTick, 2500);
+
+  // ---- 관리자 패널 ----------------------------------------------------
+  const adminToggle = document.getElementById('admin-toggle');
+  const adminBody   = document.getElementById('admin-body');
+  const adminCaret  = document.getElementById('admin-caret');
+  const healthGrid  = document.getElementById('health-grid');
+  const modeSwitch  = document.getElementById('mode-switch');
+  const modeNote    = document.getElementById('mode-note');
+  const threatsList = document.getElementById('threats-list');
+  const allowList   = document.getElementById('allow-list');
+  const allowValue  = document.getElementById('allow-value');
+  const allowNote   = document.getElementById('allow-note');
+  let adminOpen = false;
+
+  const MODE_KO = { off:'감시만 (조치 안 함)', quarantine:'격리', kill:'강제 종료' };
+
+  adminToggle.addEventListener('click', () => {
+    adminOpen = !adminOpen;
+    adminBody.style.display = adminOpen ? 'block' : 'none';
+    adminCaret.classList.toggle('open', adminOpen);
+    if (adminOpen) adminTick();
+  });
+
+  function renderHealth(h) {
+    const yn = (v) => v
+      ? `<span class="health-v on">사용</span>`
+      : `<span class="health-v off">미사용</span>`;
+    const up = Math.floor(h.uptime_seconds || 0);
+    const upStr = up >= 3600 ? `${Math.floor(up/3600)}시간 ${Math.floor((up%3600)/60)}분`
+                : up >= 60   ? `${Math.floor(up/60)}분 ${up%60}초` : `${up}초`;
+    const items = [
+      ['대응 모드', `<span class="health-v">${escape(MODE_KO[h.responder_mode]||h.responder_mode)}</span>`],
+      ['커널 드라이버 연결', yn(h.minifilter_connected)],
+      ['변조 방지', yn(h.tamper_protection)],
+      ['가동 시간', `<span class="health-v">${upStr}</span>`],
+      ['탐지기 수', `<span class="health-v">${h.detector_count}</span>`],
+      ['허용 목록', `<span class="health-v">${h.allowlist_count}개</span>`],
+      ['현재 점수', `<span class="health-v">${h.current_score} (${escape(sevKo(h.current_level))})</span>`],
+      ['감시 폴더', `<span class="health-v" style="font-size:12px;">${escape((h.watch_dirs||[]).join(', ')||'-')}</span>`],
+    ];
+    healthGrid.innerHTML = items.map(([k,v]) =>
+      `<div class="health-item"><div class="health-k">${k}</div>${v}</div>`).join('');
+    // mode switch active state
+    [...modeSwitch.querySelectorAll('.mode-btn')].forEach(b =>
+      b.classList.toggle('active', b.dataset.mode === h.responder_mode));
+    modeNote.textContent = `현재 모드: ${MODE_KO[h.responder_mode]||h.responder_mode}. `
+      + '“강제 종료”는 위협 프로세스를 즉시 종료합니다. 튜닝 중에는 “격리”나 “감시만”을 권장합니다.';
+  }
+
+  modeSwitch.addEventListener('click', async (e) => {
+    const btn = e.target.closest('.mode-btn');
+    if (!btn) return;
+    const mode = btn.dataset.mode;
+    if (mode === 'kill' && !confirm('자동 “강제 종료” 모드로 전환할까요?\n위협으로 판정된 프로세스가 즉시 종료됩니다.')) return;
+    try {
+      const res = await fetch('/api/admin/mode', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode }),
+      });
+      const j = await res.json();
+      if (j.ok) adminTick();
+      else alert('모드 변경 실패: ' + (j.error || '알 수 없음'));
+    } catch (err) { alert('모드 변경 요청 실패'); }
+  });
+
+  function renderThreats(data) {
+    const rows = (data.threats || []).filter(t => t.score > 0);
+    if (!rows.length) {
+      threatsList.innerHTML = '<div class="empty" style="padding:14px 0;">'
+        + '현재 위험 점수를 올리는 프로세스가 없습니다.</div>';
+      return;
+    }
+    threatsList.innerHTML = rows.map(t => {
+      const tags = (t.techniques || []).map(a =>
+        `<a class="att-tag" href="${escape(a.url)}" target="_blank" rel="noopener"
+            title="${escape(a.tactic_ko)} (${escape(a.tactic)})">${escape(a.id)} ${escape(a.name)}</a>`).join('');
+      const sigs = (t.signals || []).filter(s => s.contributes > 0)
+        .map(s => `<span class="sig">${escape(detKo(s.detector))}/${escape(s.name)} <b>+${s.contributes}</b></span>`).join('');
+      const pidTxt = t.pid ? `PID ${t.pid}` : 'PID 없음(파일/미끼 신호)';
+      const nm = t.process ? escape(t.process) : '(이름 미확인)';
+      const killBtn = t.pid
+        ? `<button class="threat-kill" data-kill="${t.pid}">이 PID 종료</button>` : '';
+      return `<div class="threat" data-sev="${escape(t.max_severity)}">
+        <div class="threat-head">
+          <div class="threat-left">
+            <span class="threat-score mono">${t.score}</span>
+            <span class="threat-name">${nm}</span>
+            <span class="threat-pid mono">${pidTxt}</span>
+          </div>
+          ${killBtn}
+        </div>
+        ${tags ? `<div class="att-tags">${tags}</div>` : ''}
+        ${sigs ? `<div class="threat-sigs">${sigs}</div>` : ''}
+      </div>`;
+    }).join('');
+  }
+
+  threatsList.addEventListener('click', async (e) => {
+    const btn = e.target.closest('button[data-kill]');
+    if (!btn) return;
+    const pid = btn.dataset.kill;
+    if (!confirm(`PID ${pid} 프로세스를 수동으로 종료할까요?`)) return;
+    try {
+      await fetch('/api/kill', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pid: Number(pid), reason: 'manual-admin-panel' }),
+      });
+      adminTick();
+    } catch (err) { alert('종료 요청 실패'); }
+  });
+
+  function renderAllowlist(entries) {
+    if (!entries || !entries.length) {
+      allowList.innerHTML = '<div class="empty" style="padding:10px 0;">등록된 허용 항목이 없습니다.</div>';
+      return;
+    }
+    allowList.innerHTML = entries.map(en => {
+      const kindKo = en.kind === 'path' ? '경로' : '이름';
+      return `<div class="allow-row">
+        <div style="min-width:0;">
+          <span class="kind ${en.kind === 'path' ? 'path' : ''}">${kindKo}</span>
+          <span class="allow-val mono">${escape(en.value)}</span>
+          ${en.note ? `<span class="allow-note"> · ${escape(en.note)}</span>` : ''}
+        </div>
+        <button class="allow-del" data-val="${escape(en.value)}" data-kind="${escape(en.kind)}">제거</button>
+      </div>`;
+    }).join('');
+  }
+
+  document.getElementById('allow-add-btn').addEventListener('click', async () => {
+    const value = (allowValue.value || '').trim();
+    if (!value) { allowValue.focus(); return; }
+    try {
+      const res = await fetch('/api/admin/allowlist', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ value, note: (allowNote.value || '').trim() }),
+      });
+      const j = await res.json();
+      if (j.ok) { allowValue.value = ''; allowNote.value = ''; renderAllowlist(j.entries); }
+      else alert('추가 실패: ' + (j.error || '알 수 없음'));
+    } catch (err) { alert('추가 요청 실패'); }
+  });
+  allowValue.addEventListener('keydown', e => {
+    if (e.key === 'Enter') document.getElementById('allow-add-btn').click();
+  });
+
+  allowList.addEventListener('click', async (e) => {
+    const btn = e.target.closest('button[data-val]');
+    if (!btn) return;
+    try {
+      const res = await fetch('/api/admin/allowlist', {
+        method: 'DELETE', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ value: btn.dataset.val, kind: btn.dataset.kind }),
+      });
+      const j = await res.json();
+      renderAllowlist(j.entries || []);
+    } catch (err) { alert('제거 요청 실패'); }
+  });
+
+  async function adminTick() {
+    if (!adminOpen) return;
+    try {
+      const [hRes, tRes, aRes] = await Promise.all([
+        fetch('/api/admin/health'), fetch('/api/admin/threats'),
+        fetch('/api/admin/allowlist'),
+      ]);
+      renderHealth(await hRes.json());
+      renderThreats(await tRes.json());
+      renderAllowlist((await aRes.json()).entries || []);
+    } catch (e) { /* silent */ }
+  }
+  setInterval(() => { if (adminOpen) adminTick(); }, 3000);
 </script>
 </body>
 </html>

@@ -350,6 +350,28 @@ into the detector.
 
 ---
 
+### 4.3b `detectors/ransom_note.py`
+
+Ransom-note detector. Polls watch directories every 2 seconds to find
+ransom-note files that malware drops after encrypting (HOW_TO_DECRYPT.txt,
+_readme.txt, RESTORE-MY-FILES.txt, *.hta, etc.).
+
+| Surface / constant | Notes |
+|---|---|
+| `NOTE_PATTERNS` | Regex list — `how.*to.*decrypt`, `recover.*files`, `your.*files.*encrypted`, `ransom.*note`, `_readme.txt`, etc. (high-specificity patterns only). |
+| `SPREAD_DIR_THRESHOLD = 2` | Number of *distinct* directories above which notes count as a spread. |
+| `SPREAD_WINDOW_SEC = 60` | Time window within which notes are aggregated into a spread. |
+| `W_NOTE_SINGLE = 35` | Weight for a single note (HIGH). |
+| `W_NOTE_SPREAD = 90` | Weight for multi-directory spread (CRITICAL). |
+| `RansomNoteDetector.run()` | First pass: baseline scan (ignore existing files); subsequent polls emit signals for new notes via `_handle_note()`. |
+| `_handle_note(path, now)` | Record note path in `_recent_dirs` dict, count spread. If spread ≥ 2, emit `ransom_note_spread` (CRITICAL); else `ransom_note_dropped` (HIGH, or CRITICAL if canary boost active). |
+| `_on_engine_signal(sig, score, level)` | Listens for canary signals — when canary trips, a single note inside the next 30 seconds is upgraded to CRITICAL. |
+
+Cross-signal: canary trip triggers `_boost_active() → True`, which
+upgrades `ransom_note_dropped` to CRITICAL (weight `W_NOTE_SPREAD`).
+
+---
+
 ### 4.4 `detectors/process_cmdline.py`
 
 Win11-only WMI subscriber for new process creations.  Each new process
@@ -423,7 +445,60 @@ detectors continue to work.
 
 ---
 
-### 4.7 `detectors/process_kernel.py`
+### 4.7 `allowlist.py`
+
+Operator-managed allowlist for trusted applications. Whitelist backup/
+compression/sync software by process **name** or **image path prefix** to
+exempt from scoring and auto-termination.
+
+| Surface | Notes |
+|---------|-------|
+| `AllowEntry(kind, value, note, added_at)` | A single entry. `kind` is either `"name"` (process basename, lowercase) or `"path"` (image path prefix, lowercase-normalized). |
+| `Allowlist(path="allowlist.json", autoload=True)` | Main class. Persists to JSON; `load()` on startup, `add/remove()` + `save()` on edits. |
+| `add(value, kind="", note="")` | Add entry (duplicates ignored), persist. |
+| `remove(value, kind="")` | Remove entry, persist. |
+| `entries()` | Return all entries as dict list. |
+| `pid_allowed(pid)` | Check if a PID's verified image path or basename matches an allowlist entry. Uses `psutil` to resolve PID → path/name; fail-closed if unreadable. Caches by create_time to defend against PID reuse. |
+| `signal_exempt(sig)` | Scoring trust classifier: exempt signals from allowed PIDs from scoring. **However, high-confidence single-shot signals in `_NEVER_EXEMPT_SIGNALS` (canary, ransom_note_spread, defender_self_disable) are never exempted.** |
+| `matches(name, exe_path)` | Check if name/path matches any allowlist entry (no PID lookup). |
+| `combine_trust(*classifiers)` | Compose multiple trust functions with OR. Used to merge `actor_trust.signal_actor_trusted` + `allowlist.signal_exempt`. |
+
+**Design philosophy:** Path-based entries defeat name spoofing
+(`%TEMP%\veeamagent.exe` won't match a path entry), but name-only
+entries cannot. To prevent accidental allowlisting of malware
+disguised with a trusted name, canary/ransom-note-spread and other
+high-confidence single-shot signals cannot be exempted by the allowlist.
+
+---
+
+### 4.8 `attack_map.py`
+
+Pure data + query for mapping all detection signals to **MITRE ATT&CK
+technique IDs**.
+
+| Function | Purpose |
+|----------|---------|
+| `Technique(tid, name, tactic, tactic_ko, url)` | Define a technique. E.g., `T1486 Data Encrypted for Impact`. |
+| `techniques_for(signal_name)` | Signal name → list of mapped techniques (empty if none). |
+| `technique_dicts_for(signal_name)` | Serialized form (dict list) for dashboard/reports. |
+| `primary_technique(signal_name)` | First technique only (for single-badge display). |
+| `annotate_signal_dict(sig_dict)` | Add `attack` key (technique list) to a Signal dict. Display-layer only. |
+| `label_for(signal_name)` | One-line summary: `"T1490 Inhibit System Recovery (+1)"` style. |
+
+**Mapping examples:**
+- `high_entropy_write`, `canary_modified` → `T1486 Data Encrypted for Impact`
+- `vssadmin_delete_shadows` → `T1490 Inhibit System Recovery`
+- `defender_disable_realtime` → `T1562.001 Impair Defenses` + `T1489 Service Stop`
+- `wevtutil_clear_log` → `T1070.001 Indicator Removal: Clear Windows Event Logs`
+- `schtasks_persistence` → `T1053.005 Scheduled Task/Job`
+- `powershell_downloader` → `T1059.001 PowerShell` + `T1105 Ingress Tool Transfer`
+
+The dashboard and incident reports use this mapping to present
+standard technique names to SOC/IR teams.
+
+---
+
+### 4.10 `detectors/process_kernel.py`
 
 Subscribes to the bridge's `PROCESS_START` / `PROCESS_EXIT` events
 (sourced from `PsSetCreateProcessNotifyRoutineEx`) and detects process
@@ -485,6 +560,18 @@ A small Flask app, mounted in-process by `agent.py`.
 | `/api/release` | POST `{pid}` | `responder.manual_release`. |
 | `/api/reports` | GET | `incident_reporter.recent(100)`. |
 | `/api/reports/<filename>` | GET | Raw markdown body (`text/markdown`), 404 on miss/traversal. |
+| `/api/admin/health` | GET | System health snapshot (responder mode, driver connected, uptime, watch dirs, allowlist count). |
+| `/api/admin/mode` | POST `{mode:"off\|quarantine\|kill"}` | Change responder mode on-the-fly. |
+| `/api/admin/threats` | GET | Per-PID threat analysis (signals emitted by each process + ATT&CK techniques + score contribution). |
+| `/api/admin/allowlist` | GET | All allowlist entries (name, path, note, added_at). |
+| `/api/admin/allowlist` | POST `{value, kind:"name\|path", note?}` | Add allowlist entry. |
+| `/api/admin/allowlist` | DELETE `{value, kind:"name\|path"}` | Remove allowlist entry. |
+
+**Administrator panel** — new collapsible "Administrator" section in the Flask UI:
+- **System health** — responder mode (off/quarantine/kill), minifilter connected, uptime, watch directory list, allowlist item count.
+- **Mode switcher** — POST `/api/admin/mode` to change mode on-the-fly (no restart needed).
+- **Per-PID threat breakdown** — which processes drove the score, each signal's ATT&CK technique, aggregated contribution.
+- **Allowlist editor** — UI form to add/remove entries, or manually edit `allowlist.json` and reload.
 
 `create_app(agent)` is the factory; the agent thread runs the Flask
 server with `use_reloader=False`.

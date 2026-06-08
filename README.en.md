@@ -22,6 +22,11 @@ process the moment it crosses a threshold.
   write bytes and rename counts per PID; large bursts inside a short
   window produce HIGH-severity signals independent of which directory
   the writes hit.
+- **Ransom note detector** — polls watch directories for ransom-note
+  filenames (HOW_TO_DECRYPT.txt, _readme.txt, RESTORE-MY-FILES.txt,
+  *.hta, etc.). A single note triggers HIGH; **notes spreading across
+  2+ directories within 60 seconds trigger CRITICAL**. Boosted if canary
+  already tripped. Multi-dir spread requirement keeps false positives low.
 - **Canary files** — high-confidence trip-wire; any modification yields
   a CRITICAL signal.
 - **Process command-line rules** — VSS shadow-copy deletion, BCD
@@ -34,6 +39,16 @@ process the moment it crosses a threshold.
   `kill` mode, any HIGH/CRITICAL signal that carries a PID immediately
   triggers a kernel quarantine and a `TerminateProcess`.  Critical
   processes (lsass, csrss, etc.) are on a hard-coded refuse list.
+- **Operator allowlist** — register trusted third-party apps (Veeam,
+  Acronis, 7-Zip, etc.) by process name or image path prefix to prevent
+  false-positive kills. High-confidence signals (canary, ransom note
+  spread) bypass the allowlist to prevent abuse.
+- **MITRE ATT&CK technique tagging** — every signal maps to standard
+  ATT&CK technique IDs (T1486, T1490, etc.). Appears in incident reports
+  and admin dashboard for SOC/IR integration with external SIEM/EDR.
+- **Administrator dashboard panel** — collapsible "Administrator" section
+  with system health, responder-mode switcher (off/quarantine/kill),
+  per-PID threat breakdown (with ATT&CK tags), and allowlist editor.
 - **Flask dashboard** at `http://127.0.0.1:5000` — live score, recent
   events, process table, responder log, manual kill/release.
 
@@ -143,6 +158,7 @@ CLI flags:
 |---------------------------------|----------------------------------------------------------------------------------------|
 | `--watch <dir>`                 | Directory to monitor (repeatable). Default: `./test_watch_dir`.                        |
 | `--mode {off,quarantine,kill}`  | Responder mode. Default `kill`.                                                        |
+| `--allowlist <path>`            | Operator allowlist JSON file (default `allowlist.json`). Register trusted apps to reduce false positives. |
 | `--no-minifilter`               | Skip the kernel bridge (user-mode-only detection).                                     |
 | `--no-dashboard`                | Don't start the Flask UI.                                                              |
 | `--port N`                      | Dashboard port (default `5000`).                                                       |
@@ -153,6 +169,8 @@ CLI flags:
 | `--watchdog-pid <PID>`          | PID of the companion watchdog; will be kernel-tamper-protected alongside the agent.    |
 
 ## Validation
+
+### Simulators and demos
 
 ```powershell
 # In-process demo: spins up the agent and injects safe simulated events.
@@ -168,6 +186,29 @@ python tests\simulator.py --scenario {populate|encrypt|canary|vss|bcd|full|steal
 
 Neither runs real `vssadmin` / `bcdedit` commands; cmdline rules are
 exercised through `ProcessCmdlineDetector.submit_external`.
+
+### Automated tests
+
+```powershell
+# Run pytest suite (logic-level unit tests)
+pytest
+
+# Or explicitly
+python -m pytest
+```
+
+A pytest test suite lives under `tests/`:
+- `test_scoring.py` — scoring engine and signal weights
+- `test_attack_map.py` — MITRE ATT&CK technique mapping
+- `test_allowlist.py` — operator allowlist logic
+- `test_mass_io.py` — entropy / burst detector
+- `test_ransom_note.py` — ransom note detector
+- `test_responder.py` — active responder (quarantine / kill)
+- `test_incident_report.py` — incident report generation
+- `test_dashboard_api.py` — Flask REST API
+
+**Note:** Windows-dependent parts (psutil, WMI, Flask) are skipped on non-Windows
+platforms; pure logic tests run everywhere. See `pytest.ini` and `tests/conftest.py`.
 
 ## Lab testing with real samples
 
@@ -281,6 +322,25 @@ python postmortem.py --watch C:\Users\you\Documents --out postmortem.md  # 4) co
 Remove-Item -Recurse -Force .\.venv
 ```
 
+## False-positive prevention
+
+RansomGuard is designed to reduce false positives on multiple layers:
+
+- **Native high-entropy format exclusion:** `.zip`, `.rar`, `.7z`, `.jpg`,
+  `.mp3`, `.mp4`, `.avi` and other natively high-entropy files are excluded
+  from static entropy signals. Reduces false positives from normal photo
+  editing, video transcoding, and archive updates.
+- **Ransom note multi-directory spread requirement:** A single README.txt
+  triggers HIGH; spreading across **2+ directories within 60 seconds**
+  triggers CRITICAL. Protects legitimate single documents.
+- **Operator allowlist:** Whitelist backup/compression/sync software by
+  process **name** or **image path prefix**. Path-based entries defeat
+  name spoofing (`%TEMP%\veeamagent.exe` won't match a path entry).
+  **However, high-confidence single-shot signals (canary, ransom note
+  spread) bypass the allowlist to prevent abuse.**
+- **Trust-based score exemption:** System processes (Defender, WMI,
+  servicing) are excluded from scoring.
+
 ## Safety
 
 The responder will terminate processes.  In an automated lab the
@@ -291,6 +351,14 @@ not relax it.
 
 Do not run the simulator on a machine with real user data; it overwrites
 its dummy files with high-entropy noise.
+
+## MITRE ATT&CK technique tagging
+
+All detection signals are tagged with standard **MITRE ATT&CK technique
+IDs** (T1486, T1490, etc.). The dashboard reports and admin panel display
+standard names like "T1486 Data Encrypted for Impact", "T1490 Inhibit
+System Recovery", enabling SOC/IR teams to immediately integrate with
+internal SIEM rules, threat intelligence, and external EDR platforms.
 
 ## Known gaps
 
