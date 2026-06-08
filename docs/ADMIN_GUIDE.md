@@ -346,6 +346,195 @@ Restart-Service RansomGuardAgent
 
 ---
 
+## 10. 대시보드 인증 설정
+
+토큰을 설정하면 `/api/reset`, `/api/kill`, `/api/release`, 모든
+`/api/admin/*` 엔드포인트가 인증을 요구합니다. Watchdog 용
+`/api/heartbeat` 는 항상 공개입니다.
+
+### 토큰 설정 방법 (추천 순서)
+
+**① 환경변수 (가장 안전 — 디스크에 토큰 미저장)**
+
+```powershell
+$env:RANSOMGUARD_AUTH_TOKEN = "your-secret-token"
+python agent.py --watch C:\Users
+```
+
+**② 설정 파일 (`ransomguard.toml`)**
+
+```toml
+[dashboard]
+auth_token = "your-secret-token"
+```
+
+그 다음 에이전트 실행:
+
+```powershell
+python agent.py --config ransomguard.toml --watch C:\Users
+```
+
+**③ CLI 플래그 (프로세스 목록에 토큰 노출 — 비추천)**
+
+```powershell
+python agent.py --auth-token your-secret-token --watch C:\Users
+```
+
+> 우선순위: CLI 플래그 > 환경변수 > 설정 파일.
+
+### API 호출 시 인증 헤더
+
+```powershell
+# X-API-Key 헤더
+curl -X POST http://127.0.0.1:5000/api/reset `
+  -H "X-API-Key: your-secret-token"
+
+# 또는 Bearer 토큰
+curl -X POST http://127.0.0.1:5000/api/kill `
+  -H "Authorization: Bearer your-secret-token" `
+  -H "Content-Type: application/json" `
+  -d '{"pid": 1234}'
+
+# 모드 변경
+curl -X POST http://127.0.0.1:5000/api/admin/mode `
+  -H "X-API-Key: your-secret-token" `
+  -H "Content-Type: application/json" `
+  -d '{"mode": "quarantine"}'
+
+# Heartbeat — 항상 공개 (토큰 불필요)
+curl http://127.0.0.1:5000/api/heartbeat
+```
+
+### 읽기 API 도 보호하기
+
+기본적으로 `/api/status`, `/api/events` 같은 읽기 전용 엔드포인트는
+인증 없이 접근 가능합니다. 인트라넷 외부에 노출되는 경우 설정 파일에
+다음을 추가하세요:
+
+```toml
+[dashboard]
+auth_required_for_reads = true
+```
+
+---
+
+## 11. 중앙 설정 파일 사용
+
+`ransomguard.toml` (또는 `.json`) 한 파일로 수백 대 엔드포인트의 정책을
+일괄 배포할 수 있습니다 (GPO/Intune/Ansible).
+
+### 설정 파일 예시
+
+```toml
+[general]
+watch_dirs = ["C:\\Users"]
+responder_mode = "kill"          # off | quarantine | kill
+enable_minifilter = true
+
+[dashboard]
+host = "127.0.0.1"
+port = 5000
+auth_token = ""                  # 비우면 인증 비활성 — 운영에선 env 로 주입 권장
+auth_required_for_reads = false
+
+[syslog]                         # SIEM (CEF over syslog)
+enabled = true
+host = "siem.corp.local"
+port = 514
+protocol = "udp"                 # udp | tcp
+min_severity = "HIGH"
+
+[webhook]                        # Slack/Teams/PagerDuty/SOAR
+enabled = true
+url = "https://hooks.example.com/services/XXX"
+min_severity = "CRITICAL"
+```
+
+> `.toml` 은 Python 3.11+(`tomllib`)에서 동작합니다. 3.10 이하면
+> 같은 구조의 `ransomguard.json` 을 사용하세요.
+
+### 환경변수로 비밀 주입
+
+설정 파일에 토큰/URL 을 평문으로 적는 대신 환경변수를 사용하세요.
+환경변수는 항상 설정 파일 값을 덮어씁니다:
+
+| 환경변수 | 효과 |
+|----------|------|
+| `RANSOMGUARD_AUTH_TOKEN` | 대시보드 API 토큰 설정 |
+| `RANSOMGUARD_WEBHOOK_URL` | Webhook 활성화 + URL 설정 |
+| `RANSOMGUARD_SYSLOG_HOST` | syslog 활성화 + 호스트 설정 |
+
+```powershell
+# 서비스 시작 전 환경변수 설정 예 (PowerShell)
+$env:RANSOMGUARD_AUTH_TOKEN    = "prod-secret-token"
+$env:RANSOMGUARD_WEBHOOK_URL   = "https://hooks.slack.com/services/XXX"
+$env:RANSOMGUARD_SYSLOG_HOST   = "siem.corp.local"
+python agent.py --config ransomguard.toml
+```
+
+### 설정 파일 경로 지정
+
+```powershell
+# 자동 탐지 (작업 폴더에서 ransomguard.toml / .json 검색)
+python agent.py
+
+# 경로 명시
+python agent.py --config C:\ProgramData\RansomGuard\policy.toml
+```
+
+---
+
+## 12. SIEM 및 Webhook 통합 설정
+
+### SIEM (CEF over syslog)
+
+Splunk, QRadar, ArcSight, Microsoft Sentinel 등 모든 CEF 파서와 호환.
+HIGH 이상 이벤트를 비동기로 전송합니다 (fail-open — 통합 장애가 탐지를 멈추지 않음).
+
+`ransomguard.toml` 의 `[syslog]` 섹션을 채우거나 환경변수를 설정하세요:
+
+```toml
+[syslog]
+enabled = true
+host = "siem.corp.local"   # 또는 IP
+port = 514
+protocol = "udp"           # udp | tcp
+min_severity = "HIGH"      # INFO | LOW | MEDIUM | HIGH | CRITICAL
+```
+
+또는 환경변수로만:
+
+```powershell
+$env:RANSOMGUARD_SYSLOG_HOST = "siem.corp.local"
+# enabled 와 기타 기본값은 자동 적용
+```
+
+### Webhook (Slack / Teams / PagerDuty / SOAR)
+
+```toml
+[webhook]
+enabled = true
+url = "https://hooks.example.com/services/XXX"
+min_severity = "CRITICAL"
+```
+
+또는 환경변수로만:
+
+```powershell
+$env:RANSOMGUARD_WEBHOOK_URL = "https://hooks.slack.com/services/XXX"
+```
+
+> Webhook payload 는 범용 JSON 이므로 Slack incoming webhook, Teams
+> connector, PagerDuty Events API v2, 임의 SOAR HTTP 트리거 모두 수신 가능.
+
+### Heartbeat 는 항상 공개
+
+watchdog 서비스가 `http://127.0.0.1:5000/api/heartbeat` 를 5초마다
+호출합니다. 토큰이 설정돼 있어도 이 엔드포인트는 인증 없이 200 OK
+를 반환합니다 — watchdog 의 재기동 루프가 끊기지 않도록.
+
+---
+
 ---
 
 ## English
@@ -687,3 +876,197 @@ Restart-Service RansomGuardAgent
 - Add **wildcards to allowlist** (unsupported; exact values only).
 - Leave agent in **off mode for long** (breach risk).
 - Download **allowlist.json from untrusted sources.**
+
+---
+
+## 10. Enabling Dashboard Authentication
+
+When a token is set, mutating endpoints (`/api/reset`, `/api/kill`,
+`/api/release`) and **all** `/api/admin/*` endpoints require
+authentication. The watchdog liveness probe `/api/heartbeat` is
+**always open** regardless of token configuration.
+
+### Setting the token (recommended order)
+
+**① Environment variable (safest — token never written to disk)**
+
+```powershell
+$env:RANSOMGUARD_AUTH_TOKEN = "your-secret-token"
+python agent.py --watch C:\Users
+```
+
+**② Config file (`ransomguard.toml`)**
+
+```toml
+[dashboard]
+auth_token = "your-secret-token"
+```
+
+Then start the agent:
+
+```powershell
+python agent.py --config ransomguard.toml --watch C:\Users
+```
+
+**③ CLI flag (exposes token in process listing — not recommended)**
+
+```powershell
+python agent.py --auth-token your-secret-token --watch C:\Users
+```
+
+> Precedence: CLI flag > environment variable > config file.
+
+### Passing the token in API calls
+
+```powershell
+# X-API-Key header
+curl -X POST http://127.0.0.1:5000/api/reset `
+  -H "X-API-Key: your-secret-token"
+
+# Or Bearer token
+curl -X POST http://127.0.0.1:5000/api/kill `
+  -H "Authorization: Bearer your-secret-token" `
+  -H "Content-Type: application/json" `
+  -d '{"pid": 1234}'
+
+# Change responder mode
+curl -X POST http://127.0.0.1:5000/api/admin/mode `
+  -H "X-API-Key: your-secret-token" `
+  -H "Content-Type: application/json" `
+  -d '{"mode": "quarantine"}'
+
+# Heartbeat — always open, no token needed
+curl http://127.0.0.1:5000/api/heartbeat
+```
+
+### Protecting read endpoints too
+
+By default, read-only endpoints (`/api/status`, `/api/events`, etc.) are
+open without authentication. If the dashboard is exposed outside a trusted
+network, add this to the config:
+
+```toml
+[dashboard]
+auth_required_for_reads = true
+```
+
+---
+
+## 11. Central Config File
+
+A single `ransomguard.toml` (or `.json`) file can deploy policy to an
+entire fleet via GPO / Intune / Ansible.
+
+### Example config
+
+```toml
+[general]
+watch_dirs = ["C:\\Users"]
+responder_mode = "kill"          # off | quarantine | kill
+enable_minifilter = true
+
+[dashboard]
+host = "127.0.0.1"
+port = 5000
+auth_token = ""                  # leave empty to disable auth — inject via env var in production
+auth_required_for_reads = false
+
+[syslog]                         # SIEM (CEF over syslog)
+enabled = true
+host = "siem.corp.local"
+port = 514
+protocol = "udp"                 # udp | tcp
+min_severity = "HIGH"
+
+[webhook]                        # Slack / Teams / PagerDuty / SOAR
+enabled = true
+url = "https://hooks.example.com/services/XXX"
+min_severity = "CRITICAL"
+```
+
+> `.toml` requires Python 3.11+ (`tomllib`). On Python 3.10 use
+> `ransomguard.json` with the same structure.
+
+### Secret injection via environment variables
+
+Prefer environment variables over storing secrets in the config file.
+Environment variables always override the file:
+
+| Variable | Effect |
+|----------|--------|
+| `RANSOMGUARD_AUTH_TOKEN` | Set the dashboard API token |
+| `RANSOMGUARD_WEBHOOK_URL` | Enable webhook and set the URL |
+| `RANSOMGUARD_SYSLOG_HOST` | Enable syslog and set the host |
+
+```powershell
+# Example: set env vars before starting the agent
+$env:RANSOMGUARD_AUTH_TOKEN    = "prod-secret-token"
+$env:RANSOMGUARD_WEBHOOK_URL   = "https://hooks.slack.com/services/XXX"
+$env:RANSOMGUARD_SYSLOG_HOST   = "siem.corp.local"
+python agent.py --config ransomguard.toml
+```
+
+### Specifying the config path
+
+```powershell
+# Auto-detect (searches working directory for ransomguard.toml / .json)
+python agent.py
+
+# Explicit path
+python agent.py --config C:\ProgramData\RansomGuard\policy.toml
+```
+
+---
+
+## 12. SIEM and Webhook Integration
+
+### SIEM (CEF over syslog)
+
+Compatible with any CEF parser — Splunk, QRadar, ArcSight, Microsoft
+Sentinel. HIGH+ events are forwarded asynchronously. Fail-open: an
+integration failure is logged but never stops detection.
+
+Fill in the `[syslog]` section of `ransomguard.toml`, or set the
+environment variable:
+
+```toml
+[syslog]
+enabled = true
+host = "siem.corp.local"   # or IP address
+port = 514
+protocol = "udp"           # udp | tcp
+min_severity = "HIGH"      # INFO | LOW | MEDIUM | HIGH | CRITICAL
+```
+
+Or via environment variable alone:
+
+```powershell
+$env:RANSOMGUARD_SYSLOG_HOST = "siem.corp.local"
+# enabled and other defaults are applied automatically
+```
+
+### Webhook (Slack / Teams / PagerDuty / SOAR)
+
+```toml
+[webhook]
+enabled = true
+url = "https://hooks.example.com/services/XXX"
+min_severity = "CRITICAL"
+```
+
+Or via environment variable alone:
+
+```powershell
+$env:RANSOMGUARD_WEBHOOK_URL = "https://hooks.slack.com/services/XXX"
+```
+
+> The webhook payload is generic JSON, so it works with Slack incoming
+> webhooks, Teams connectors, PagerDuty Events API v2, and arbitrary
+> SOAR HTTP triggers without modification.
+
+### Heartbeat stays open
+
+The watchdog service polls `http://127.0.0.1:5000/api/heartbeat` every
+5 seconds. Even when a token is configured, this endpoint returns 200 OK
+without authentication — ensuring the watchdog restart loop is never
+broken by auth changes.

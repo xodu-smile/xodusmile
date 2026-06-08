@@ -74,6 +74,30 @@ ENCRYPTION_SIGNAL_NAMES = frozenset({
 # 하우스키핑 삭제가 점수를 CRITICAL 까지 밀어올리던 인플레의 주범이었다.
 CORRELATION_GATED_NAMES = frozenset({"file_delete"})
 
+# "정상 프로세스를 이용해 작동하는 랜섬웨어" 대응 — actor-trust 게이트의 사각지대.
+# ----------------------------------------------------------------------------
+# actor_trust 게이트는 *이미지 경로* 로 신뢰를 판정한다.  그래서 랜섬웨어가
+# 신뢰받는 프로세스(svchost/explorer 등)에 **코드 인젝션(T1055)** 하거나 그
+# 이름/경로로 **위장(T1036)** 하면, 그 안에서 일어나는 암호화 활동까지 "신뢰
+# actor" 로 분류돼 점수에서 통째로 면제되는 치명적 사각지대가 생긴다.
+#
+# 그러나 아래 신호들은 *정상적인 시스템 컴포넌트라면 절대* 일으키지 않는
+# 지상 진실(ground-truth) 암호화 증거다:
+#   - canary 디코이 파일(사용자/OS 가 건드릴 일 없음)의 변조/삭제
+#   - 사용자 문서의 매직바이트 소실 / 랜섬 확장자로의 이름변경
+#   - 협박문 다중 확산
+#   - 커널이 격리된 PID 의 쓰기를 *차단* 한 사건
+# 따라서 이 신호들은 actor 가 "신뢰" 로 찍혀 있어도 면제하지 않는다 — 신뢰
+# 프로세스가 이런 행위를 하면 그것은 곧 인젝션/위장의 증거이므로 항상 채점·
+# 상관시킨다.  (서비싱 svchost/TiWorker 가 정상적으로 낼 수 있는 high_entropy_
+# write / kernel_write_burst 등은 의도적으로 제외해 신규 오탐을 만들지 않는다.)
+GROUND_TRUTH_ENCRYPTION = frozenset({
+    "canary_modified", "canary_deleted",
+    "magic_bytes_lost", "suspicious_extension",
+    "ransom_note_spread",
+    "kernel_blocked_op",
+})
+
 
 class ScoringEngine:
     """
@@ -204,7 +228,17 @@ class ScoringEngine:
     @staticmethod
     def _trusted(sig: "Signal") -> bool:
         """Was this signal's actor classified as a trusted system component
-        at submit time?  Stamped by ``submit`` when a classifier is wired."""
+        at submit time?  Stamped by ``submit`` when a classifier is wired.
+
+        Ground-truth encryption evidence (canary trip, magic-byte loss,
+        ransom-extension rename, note spread, kernel-blocked write) is NEVER
+        treated as trusted — a genuine system component does not do these, so
+        if a "trusted" image produces one it is evidence of injection (T1055)
+        or masquerade (T1036), and we must score it instead of exempting it.
+        This closes the trust-gate blind spot for ransomware that runs inside
+        a legitimate process."""
+        if sig.name in GROUND_TRUTH_ENCRYPTION:
+            return False
         return bool((sig.metadata or {}).get("actor_trusted"))
 
     def _current_score_locked(self) -> int:

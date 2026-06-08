@@ -19,14 +19,18 @@ Windows 11용 **랜섬웨어 전용 소형 EDR** 입니다.
 |---|---|
 | **커널 미니필터** | `minifilter/RansomGuard.sys` 드라이버가 모든 볼륨에서 `IRP_MJ_CREATE`, `IRP_MJ_WRITE`, `IRP_MJ_SET_INFORMATION` 을 가로채요. `(pid, path, op, bytes)` 형식 이벤트를 필터 통신 포트로 사용자 모드에 스트리밍하고, 격리된 PID 의 후속 쓰기/이름변경을 **커널 안에서 차단** 합니다. |
 | **PID 단위 폭발 감지** | minifilter_bridge 가 PID 별로 쓰기 바이트와 rename 횟수를 누적해요. 짧은 시간 안에 폭증하면 어느 폴더든 상관없이 HIGH 신호 발생. |
-| **협박문 탐지** | 각 감시 폴더를 폴링해서 협박문(HOW_TO_DECRYPT.txt, _readme.txt, RESTORE-MY-FILES.txt, *.hta 등) 패턴을 찾아요. 단일 파일은 HIGH, **2개 이상 폴더에서 60초 안에 퍼지면 CRITICAL** 신호 발생. 카나리 트립 시 단일 노트도 강화. |
+| **협박문 탐지 (내용 기반)** | 파일명 패턴(`HOW_TO_DECRYPT.txt`, `_readme.txt`, `*.hta` 등)**에 더해 파일 내용을 분석**합니다 — 암호화폐 지갑 주소, `.onion` 주소, "your files have been encrypted" 류 협박 문구, 연락처/결제 용어. 그래서 **이름이 무작위인 협박문도(`A7F3C.txt`) 내용으로 탐지**합니다. 단일 확인 노트는 HIGH, **내용으로 확인된 노트가 3개 이상 폴더에 퍼지거나 / 실제 암호화 활동이 동반된 다중 확산이면 CRITICAL**. (이름만 매칭된 단발은 MEDIUM 힌트로만 — 오탐 억제.) |
 | **카나리 파일** | 사용자가 절대 안 건드릴 미끼 파일을 깔아두고 해시로 감시. 변경 시 **단발로 CRITICAL** 발사. |
-| **프로세스 명령어 룰** | VSS 섀도카피 삭제, BCD 변조, Defender 비활성화, 로그 삭제, BitLocker 해제, 흔한 PowerShell 난독화 패턴 등 22개 룰. |
+| **프로세스 명령어 룰 (33개)** | VSS 섀도카피 삭제·리사이즈, BCD 변조, Defender 비활성화, 로그 삭제, BitLocker 해제, PowerShell 난독화에 더해 — **내장/서명 도구를 암호화 엔진으로 악용**하는 living-off-the-land 룰: `cipher /e`(EFS), BitLocker 강제 암호화(`manage-bde -on`/`Enable-BitLocker`), LOLBin 프록시 실행(`certutil`/`bitsadmin`/`esentutl`/`wmic process call create`), BYOVD(`sc create type=kernel`), 이중 갈취 스테이징(`7z -p`/`rclone`). |
+| **정상 프로세스 악용 탐지** | "정상 프로세스로 작동하는 랜섬웨어" 대응. ① **신뢰 게이트 사각지대 차단** — 신뢰 프로세스(svchost/explorer 등)에 인젝션(T1055)/위장(T1036)된 랜섬웨어가 카나리 변조·매직바이트 소실·랜섬 확장자 변경 같은 *지상 진실(ground-truth)* 암호화를 일으키면, 신뢰 면제를 **무시하고 항상 채점**합니다. ② **시스템 바이너리 위장 탐지** — `%TEMP%\svchost.exe` 처럼 핵심 시스템 이름을 달고 System32 밖에서 실행되는 사칭(T1036.005)을 잡아 즉시 대응. |
 | **프로세스 트리 휴리스틱** | LOLBin 부모-자식 체인(Office → PowerShell, 브라우저 → 스크립트 호스트), 한 부모가 짧은 시간 안에 자식을 다수 spawn 하는 fan-out, psutil 기반 디스크 쓰기 burst. |
 | **자동 대응 (Active Responder)** | 3가지 모드 — `off` / `quarantine` / `kill`. `kill` 모드에서 PID 가 명시된 HIGH/CRITICAL 신호가 발생하면 즉시 커널 격리 + `TerminateProcess`. **lsass, csrss 같은 시스템 핵심 프로세스는 절대 안 죽이는 하드코딩 목록** 으로 보호. |
 | **운영자 허용 목록** | 정상 백업/동기화/압축 앱(Veeam, Acronis, 7-Zip 등)을 프로세스 이름 또는 경로 접두사로 등록해서 **오탐 방지**. 카나리/협박문 확산처럼 높은 신뢰도 신호는 여전히 탐지. |
-| **MITRE ATT&CK 기법 태깅** | 모든 신호가 표준 ATT&CK 기법(T1486, T1490 등)으로 매핑. 보고서와 대시보드에 표기해서 SOC/IR 팀의 위협 인텔 연계 간편화. |
-| **관리자 대시보드 패널** | Flask UI 내 새 "관리자 패널" 섹션 — 시스템 상태(드라이버, 감시 폴더, 허용 목록), 모드 전환(off/quarantine/kill), PID 별 위협 분석(ATT&CK 기법 표시), 허용 목록 편집. |
+| **MITRE ATT&CK 기법 태깅** | 모든 신호가 표준 ATT&CK 기법(T1486, T1490, T1055, T1218 등)으로 매핑. 보고서와 대시보드에 표기해서 SOC/IR 팀의 위협 인텔 연계 간편화. |
+| **SIEM / Webhook 통합** *(기업)* | HIGH 이상 이벤트를 **CEF over syslog**(Splunk/QRadar/ArcSight/Sentinel) 와 **범용 JSON Webhook**(Slack/Teams/PagerDuty/SOAR)으로 비동기 전송. 외부 의존성 0, fail-open(통합 장애가 탐지를 멈추지 않음). |
+| **대시보드 인증** *(기업)* | 토큰이 설정되면 상태 변경/관리자 엔드포인트(`/api/reset`, `/api/kill`, `/api/admin/*`)는 `X-API-Key` 또는 `Authorization: Bearer` 를 요구. watchdog 용 `/api/heartbeat` 는 항상 공개. |
+| **중앙 설정 파일** *(기업)* | `ransomguard.toml`/`.json` 로 정책(감시 경로·모드·통합·인증)을 일괄 배포(GPO/Intune/Ansible). 비밀(토큰/Webhook URL)은 환경변수 우선. |
+| **관리자 대시보드 패널** | Flask UI 내 "관리자 패널" — 시스템 상태(드라이버, 감시 폴더, 허용 목록, 통합/인증 상태), 모드 전환, PID 별 위협 분석(ATT&CK 기법 표시), 허용 목록 편집. |
 | **Flask 대시보드** | `http://127.0.0.1:5000` — 실시간 점수, 최근 이벤트, 프로세스 목록, 자동 대응 로그, 수동 kill/release 버튼. |
 
 ---
@@ -135,8 +139,10 @@ python agent.py --no-tamper-protection
 
 | 플래그 | 효과 |
 |---|---|
+| `--config <path>` | 정책 파일(`ransomguard.toml`/`.json`) 경로. 생략 시 작업 폴더에서 자동 탐색. **CLI 플래그 > 설정 파일 > 기본값** 순으로 우선. |
 | `--watch <dir>` | 감시할 디렉토리 (여러 번 지정 가능). 기본: `./test_watch_dir` |
 | `--mode {off,quarantine,kill}` | Responder 모드. 기본 `kill` |
+| `--auth-token <token>` | 대시보드 API 토큰. **`RANSOMGUARD_AUTH_TOKEN` 환경변수나 설정 파일 사용 권장**(프로세스 목록 노출 방지). 설정 시 변경성/관리자 엔드포인트에 인증 요구. |
 | `--allowlist <path>` | 운영자 허용 목록 JSON 파일 경로 (기본 `allowlist.json`). 신뢰하는 앱 등록으로 오탐 감소. |
 | `--no-minifilter` | 커널 다리 비활성화 (사용자 모드만 사용) |
 | `--no-dashboard` | Flask UI 시작 안 함 |
@@ -146,6 +152,72 @@ python agent.py --no-tamper-protection
 | `--no-notify` | 프로세스 종료 시 데스크톱 알림 끄기 |
 | `--no-tamper-protection` | `RtlSetProcessIsCritical` + DACL 강화 끄기 (개발 시 taskkill 가능하게) |
 | `--watchdog-pid <PID>` | 동반 watchdog 의 PID. Agent 와 함께 커널 변조 방지 등록 |
+
+> **환경변수(비밀 주입):** `RANSOMGUARD_AUTH_TOKEN`(대시보드 토큰),
+> `RANSOMGUARD_WEBHOOK_URL`(Webhook 활성화+URL), `RANSOMGUARD_SYSLOG_HOST`(syslog
+> 활성화+호스트). 환경변수는 항상 설정 파일을 덮어씁니다.
+
+### 설정 파일 예시 (`ransomguard.toml`)
+
+```toml
+[general]
+watch_dirs = ["C:\\Users"]
+responder_mode = "kill"          # off | quarantine | kill
+enable_minifilter = true
+
+[dashboard]
+host = "127.0.0.1"
+port = 5000
+auth_token = ""                  # 비우면 인증 비활성 — 운영에선 env 로 주입 권장
+auth_required_for_reads = false  # true 면 읽기 API 도 토큰 요구
+
+[syslog]                         # SIEM (CEF over syslog)
+enabled = true
+host = "siem.corp.local"
+port = 514
+protocol = "udp"                 # udp | tcp
+min_severity = "HIGH"
+
+[webhook]                        # Slack/Teams/PagerDuty/SOAR
+enabled = true
+url = "https://hooks.example.com/services/XXX"
+min_severity = "CRITICAL"
+```
+
+> `.toml` 은 Python 3.11+(`tomllib`)에서 동작합니다. 3.10 이하면 같은 구조의
+> `ransomguard.json` 을 쓰세요.
+
+---
+
+## 기업 배포 (Enterprise)
+
+연구/학습용 단독 에이전트를 **실제 기업 환경 제품**으로 쓰기 위한 기능들입니다.
+
+**이번 버전에 구현된 것:**
+
+- **중앙 정책 파일** (`config.py`) — `ransomguard.toml`/`.json` 한 파일로 수백 대
+  엔드포인트 정책을 일괄 배포. 비밀은 환경변수 우선(디스크에 토큰 미보존).
+- **SIEM 통합** (`integrations.py`) — CEF over syslog. 모든 SOC 가 파싱하는 표준
+  포맷으로 위협 이벤트를 중앙 SIEM 에 스트리밍.
+- **알림/SOAR Webhook** — Slack/Teams/PagerDuty/SOAR 로 즉시 JSON 알림.
+  비동기 워커 + fail-open 으로 탐지 핫패스를 절대 막지 않음.
+- **대시보드 인증** — 무인증 관리자 API(보호 끄기/프로세스 종료/허용목록 편집)
+  구멍을 토큰 인증으로 차단.
+- **감사/포렌식** *(기존)* — SQLite 이벤트 스토어, 마크다운 사건 보고서,
+  responder 액션 로그, ATT&CK 매핑.
+- **고가용성/변조 방지** *(기존)* — watchdog 서비스 자동 재시작,
+  `RtlSetProcessIsCritical`, DACL 강화, 커널 `ObCallback` 핸들 보호.
+
+**완전한 기업 제품을 위해 추가로 필요한 것 (로드맵):**
+
+- **중앙 관리 콘솔(fleet)** — 다수 에이전트의 상태/정책/경보를 한 화면에서
+  관리하는 서버. 현재는 단말별 syslog/webhook 푸시까지 구현.
+- **RBAC + SSO** — 대시보드 다중 사용자 역할(분석가/관리자), SAML/OIDC 연동.
+  현재는 단일 토큰.
+- **서명된 MSI 배포 + 자동 업데이트 채널** — winget/Intune 패키징, 단계적 롤아웃.
+- **정책 원격 푸시 + 설정 드리프트 감지** — 중앙에서 정책 변경을 강제.
+- **격리 파일 보관소 + 원클릭 복구** — VSS/백업 연계 롤백.
+- **라이선싱/텔레메트리 옵트인**, **고객사별 멀티테넌시**.
 
 ---
 

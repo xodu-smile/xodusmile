@@ -13,44 +13,23 @@ process the moment it crosses a threshold.
 
 ## Features
 
-- **Kernel minifilter** (`minifilter/RansomGuard.sys`) — observes
-  `IRP_MJ_CREATE`, `IRP_MJ_WRITE`, and `IRP_MJ_SET_INFORMATION` on every
-  volume; streams `(pid, path, op, bytes)` events to user mode over a
-  filter communication port; and can block subsequent writes/renames
-  from a quarantined PID inside the kernel.
-- **Per-PID burst detection in user mode** — the bridge accumulates
-  write bytes and rename counts per PID; large bursts inside a short
-  window produce HIGH-severity signals independent of which directory
-  the writes hit.
-- **Ransom note detector** — polls watch directories for ransom-note
-  filenames (HOW_TO_DECRYPT.txt, _readme.txt, RESTORE-MY-FILES.txt,
-  *.hta, etc.). A single note triggers HIGH; **notes spreading across
-  2+ directories within 60 seconds trigger CRITICAL**. Boosted if canary
-  already tripped. Multi-dir spread requirement keeps false positives low.
-- **Canary files** — high-confidence trip-wire; any modification yields
-  a CRITICAL signal.
-- **Process command-line rules** — VSS shadow-copy deletion, BCD
-  tampering, Defender disablement, log wiping, BitLocker disable, common
-  PowerShell obfuscation patterns.
-- **Process tree heuristics** — LOLBin parent/child chains (Office →
-  PowerShell, browser → script host), child fan-out from one parent,
-  user-mode disk-write bursts from psutil.
-- **Active responder** — three modes: `off`, `quarantine`, `kill`.  In
-  `kill` mode, any HIGH/CRITICAL signal that carries a PID immediately
-  triggers a kernel quarantine and a `TerminateProcess`.  Critical
-  processes (lsass, csrss, etc.) are on a hard-coded refuse list.
-- **Operator allowlist** — register trusted third-party apps (Veeam,
-  Acronis, 7-Zip, etc.) by process name or image path prefix to prevent
-  false-positive kills. High-confidence signals (canary, ransom note
-  spread) bypass the allowlist to prevent abuse.
-- **MITRE ATT&CK technique tagging** — every signal maps to standard
-  ATT&CK technique IDs (T1486, T1490, etc.). Appears in incident reports
-  and admin dashboard for SOC/IR integration with external SIEM/EDR.
-- **Administrator dashboard panel** — collapsible "Administrator" section
-  with system health, responder-mode switcher (off/quarantine/kill),
-  per-PID threat breakdown (with ATT&CK tags), and allowlist editor.
-- **Flask dashboard** at `http://127.0.0.1:5000` — live score, recent
-  events, process table, responder log, manual kill/release.
+| Category | Description |
+|---|---|
+| **Kernel minifilter** | `minifilter/RansomGuard.sys` intercepts `IRP_MJ_CREATE`, `IRP_MJ_WRITE`, and `IRP_MJ_SET_INFORMATION` on every volume; streams `(pid, path, op, bytes)` events to user mode over a filter communication port; and can block subsequent writes/renames from a quarantined PID inside the kernel. |
+| **Per-PID burst detection** | The bridge accumulates write bytes and rename counts per PID; large bursts inside a short window produce HIGH-severity signals independent of which directory the writes hit. |
+| **Ransom note detector (content-aware)** | Detects ransom notes by **filename pattern** (HOW_TO_DECRYPT.txt, _readme.txt, *.hta, etc.) **and by file content** — crypto wallet addresses (BTC/ETH/Monero), `.onion` URLs, "your files have been encrypted" extortion phrases, and payment/contact terms. **Notes with arbitrary/random filenames (e.g., `A7F3C.txt`) are therefore caught by content.** A single content-confirmed note triggers HIGH; name-only single note = MEDIUM hint only. **CRITICAL fires when content-confirmed notes spread across ≥ 3 directories, OR name-matched notes spread across ≥ 3 dirs with corroborating real encryption activity** (canary / mass_io) — name-only spread alone no longer auto-escalates to avoid false positives. |
+| **Canary files** | High-confidence trip-wire deployed in every watch directory; any modification or deletion yields a standalone CRITICAL signal. |
+| **Process command-line rules (33 rules)** | VSS shadow-copy deletion/resize, BCD tampering, Defender disablement, log wiping, BitLocker disable, PowerShell obfuscation — plus living-off-the-land rules that abuse built-in/signed tools as encryption engines: `cipher /e` (EFS), BitLocker forced encryption (`manage-bde -on` / `Enable-BitLocker`), LOLBin proxy execution (`certutil` / `bitsadmin` / `esentutl` / `wmic process call create`), BYOVD (`sc create type=kernel`), double-extortion staging (`7z -p` / `rclone`). |
+| **Ransomware via legitimate processes** | Closes the trust-gate blind spot: ① **Ground-truth encryption bypass** — if a trusted process (svchost, explorer, etc.) injected (T1055) or masqueraded (T1036) by ransomware produces canary trips, magic-byte loss, or suspicious extension renames, the trust exemption is **ignored and scoring always proceeds**. ② **System-binary masquerade detection** — `process_masquerade` (HIGH, T1036.005) fires when a core system binary name (svchost.exe, lsass.exe, etc.) runs from outside System32/SysWOW64 (e.g., `%TEMP%\svchost.exe`). |
+| **Process tree heuristics** | LOLBin parent/child chains (Office → PowerShell, browser → script host), child fan-out from one parent, user-mode disk-write bursts from psutil. |
+| **Active responder** | Three modes: `off`, `quarantine`, `kill`. In `kill` mode, any HIGH/CRITICAL signal carrying a PID immediately triggers a kernel quarantine and a `TerminateProcess`. Critical system processes (lsass, csrss, etc.) are on a hard-coded never-kill list. |
+| **Operator allowlist** | Register trusted third-party apps (Veeam, Acronis, 7-Zip, etc.) by process name or image path prefix to prevent false-positive kills. High-confidence signals (canary, ransom-note spread) bypass the allowlist to prevent abuse. |
+| **MITRE ATT&CK technique tagging** | Every signal maps to standard ATT&CK technique IDs (T1486, T1490, T1055, T1218, etc.). Appears in incident reports and the admin dashboard for SOC/IR integration. |
+| **SIEM / Webhook integration** *(enterprise)* | HIGH+ events forwarded asynchronously via **CEF over syslog** (Splunk/QRadar/ArcSight/Sentinel) and a **generic JSON webhook** (Slack/Teams/PagerDuty/SOAR). Zero external dependencies; fail-open (an integration failure never stops detection). |
+| **Dashboard authentication** *(enterprise)* | When a token is configured, mutating and admin endpoints (`/api/reset`, `/api/kill`, `/api/admin/*`) require `X-API-Key` or `Authorization: Bearer`. The watchdog `/api/heartbeat` is always open. |
+| **Central config file** *(enterprise)* | `ransomguard.toml` / `.json` for deploying policy (watch paths, mode, integrations, auth) to fleets via GPO/Intune/Ansible. Secrets (token, webhook URL) are injected via environment variables which always win over the file. |
+| **Administrator dashboard panel** | Collapsible "Administrator" section with system health (driver, watch dirs, allowlist, integration/auth status), mode switcher, per-PID threat breakdown (ATT&CK tags), and allowlist editor. |
+| **Flask dashboard** | `http://127.0.0.1:5000` — live score, recent events, process table, responder log, manual kill/release. |
 
 ## Scoring
 
@@ -156,8 +135,10 @@ CLI flags:
 
 | Flag                            | Effect                                                                                 |
 |---------------------------------|----------------------------------------------------------------------------------------|
+| `--config <path>`               | Policy file (`ransomguard.toml` / `.json`) path. Omit to auto-detect in the working directory. **Precedence: CLI flag > config file > built-in default.** |
 | `--watch <dir>`                 | Directory to monitor (repeatable). Default: `./test_watch_dir`.                        |
 | `--mode {off,quarantine,kill}`  | Responder mode. Default `kill`.                                                        |
+| `--auth-token <token>`          | Dashboard API token. **Prefer `RANSOMGUARD_AUTH_TOKEN` env var or config file** (keeps the token out of process listings). When set, mutating and admin endpoints require authentication. |
 | `--allowlist <path>`            | Operator allowlist JSON file (default `allowlist.json`). Register trusted apps to reduce false positives. |
 | `--no-minifilter`               | Skip the kernel bridge (user-mode-only detection).                                     |
 | `--no-dashboard`                | Don't start the Flask UI.                                                              |
@@ -167,6 +148,64 @@ CLI flags:
 | `--no-notify`                   | Suppress desktop notifications when a process is killed.                               |
 | `--no-tamper-protection`        | Disable `RtlSetProcessIsCritical` + DACL hardening (useful in dev so you can taskkill).|
 | `--watchdog-pid <PID>`          | PID of the companion watchdog; will be kernel-tamper-protected alongside the agent.    |
+
+> **Secret injection via environment variables:** `RANSOMGUARD_AUTH_TOKEN` (dashboard token),
+> `RANSOMGUARD_WEBHOOK_URL` (enables webhook + sets URL), `RANSOMGUARD_SYSLOG_HOST` (enables
+> syslog + sets host). Environment variables always override the config file.
+
+### Config file example (`ransomguard.toml`)
+
+```toml
+[general]
+watch_dirs = ["C:\\Users"]
+responder_mode = "kill"          # off | quarantine | kill
+enable_minifilter = true
+
+[dashboard]
+host = "127.0.0.1"
+port = 5000
+auth_token = ""                  # leave empty to disable auth — use env var in production
+auth_required_for_reads = false  # true = read-only APIs also require the token
+
+[syslog]                         # SIEM (CEF over syslog)
+enabled = true
+host = "siem.corp.local"
+port = 514
+protocol = "udp"                 # udp | tcp
+min_severity = "HIGH"
+
+[webhook]                        # Slack / Teams / PagerDuty / SOAR
+enabled = true
+url = "https://hooks.example.com/services/XXX"
+min_severity = "CRITICAL"
+```
+
+> `.toml` requires Python 3.11+ (`tomllib`). On Python 3.10 use `ransomguard.json`
+> with the same structure.
+
+## Enterprise Deployment
+
+Features added to bridge the gap between a research prototype and a production enterprise product.
+
+**Implemented in this version:**
+
+- **Central policy file** (`config.py`) — `ransomguard.toml` / `.json` deploys policy to hundreds of endpoints in one file. Secrets are resolved from environment variables first (no tokens stored on disk).
+- **SIEM integration** (`integrations.py`) — CEF over syslog. Streams threat events to a central SIEM in the standard format every SOC already parses (Splunk, QRadar, ArcSight, Sentinel).
+- **Alert / SOAR webhook** — instant JSON alerts to Slack/Teams/PagerDuty/SOAR. Async worker + fail-open so the detection hot-path is never blocked.
+- **Dashboard authentication** — token-gates the unauthenticated admin API surface (disable responder, kill processes, edit allowlist). Watchdog `/api/heartbeat` stays open.
+- **Audit / forensics** *(existing)* — SQLite event store, Markdown incident reports, responder action log, ATT&CK mapping.
+- **High-availability / tamper-resistance** *(existing)* — watchdog service auto-restart, `RtlSetProcessIsCritical`, DACL hardening, kernel `ObCallback` handle protection.
+
+**Roadmap — additional work needed for a full enterprise product:**
+
+- **Fleet management console** — single pane for status, policy, and alerts across many agents. Currently each endpoint pushes via syslog/webhook.
+- **RBAC + SSO** — multi-role dashboard (analyst / admin), SAML/OIDC. Currently single token.
+- **Signed MSI packaging + auto-update channel** — winget/Intune packaging, staged rollout.
+- **Remote policy push + drift detection** — centrally enforce policy changes.
+- **Quarantine file vault + one-click recovery** — VSS/backup-integrated rollback.
+- **Licensing / telemetry opt-in**, **per-tenant multi-tenancy**.
+
+---
 
 ## Validation
 
@@ -330,9 +369,11 @@ RansomGuard is designed to reduce false positives on multiple layers:
   `.mp3`, `.mp4`, `.avi` and other natively high-entropy files are excluded
   from static entropy signals. Reduces false positives from normal photo
   editing, video transcoding, and archive updates.
-- **Ransom note multi-directory spread requirement:** A single README.txt
-  triggers HIGH; spreading across **2+ directories within 60 seconds**
-  triggers CRITICAL. Protects legitimate single documents.
+- **Ransom note multi-directory spread requirement:** A single content-confirmed
+  note triggers HIGH; a name-only match is a MEDIUM hint only. CRITICAL requires
+  content-confirmed notes across **3+ directories**, or name-matched notes across
+  3+ dirs with corroborating real encryption activity. Name-only spread alone no
+  longer auto-escalates to CRITICAL. Protects legitimate single documents.
 - **Operator allowlist:** Whitelist backup/compression/sync software by
   process **name** or **image path prefix**. Path-based entries defeat
   name spoofing (`%TEMP%\veeamagent.exe` won't match a path entry).

@@ -230,12 +230,16 @@ class TestTrustedActorClassifier:
         assert sig.metadata.get("actor_trusted") is True
 
     def test_trusted_signal_excluded_from_score(self):
-        """A trusted signal contributes 0 to the score."""
+        """A trusted signal contributes 0 to the score.
+
+        Uses a non-ground-truth encryption signal: ground-truth signals
+        (canary/magic-loss/…) are intentionally never exempted by trust — see
+        TestGroundTruthEncryption below."""
         def always_trust(sig):
             return True
 
         engine = ScoringEngine(is_trusted_actor=always_trust)
-        engine.submit(_sig(name="canary_modified", weight=50))
+        engine.submit(_sig(name="high_entropy_write", weight=50))
         assert engine.current_score() == 0
 
     def test_untrusted_signal_not_stamped_as_trusted(self):
@@ -276,7 +280,7 @@ class TestTrustedActorClassifier:
             return False
 
         engine = ScoringEngine(is_trusted_actor=counting_classifier)
-        sig = _sig(name="canary_modified", weight=50,
+        sig = _sig(name="high_entropy_write", weight=50,
                    metadata={"actor_trusted": True})
         engine.submit(sig)
         assert len(call_count) == 0  # classifier never called
@@ -316,8 +320,36 @@ class TestHasEncryptionActivity:
             return True
 
         engine = ScoringEngine(is_trusted_actor=always_trust)
-        engine.submit(_sig(name="canary_modified", weight=10))
+        engine.submit(_sig(name="high_entropy_write", weight=10))
         assert engine.has_encryption_activity() is False
+
+
+# ---------------------------------------------------------------------------
+# Ground-truth encryption bypasses the trust gate (injection/masquerade defence)
+# ---------------------------------------------------------------------------
+
+class TestGroundTruthEncryption:
+    """Ransomware running inside a *trusted* image (process injection T1055 or
+    masquerade T1036) would otherwise have its encryption activity exempted by
+    the actor-trust gate.  Ground-truth signals must defeat that exemption."""
+
+    def test_ground_truth_signal_scored_even_when_actor_trusted(self):
+        from scoring import GROUND_TRUTH_ENCRYPTION
+        for name in GROUND_TRUTH_ENCRYPTION:
+            engine = ScoringEngine(is_trusted_actor=lambda sig: True)
+            engine.submit(_sig(name=name, weight=50))
+            assert engine.current_score() == 50, (
+                f"{name} must be scored despite trusted actor")
+
+    def test_ground_truth_counts_as_encryption_activity_when_trusted(self):
+        engine = ScoringEngine(is_trusted_actor=lambda sig: True)
+        engine.submit(_sig(name="canary_modified", weight=10))
+        assert engine.has_encryption_activity() is True
+
+    def test_non_ground_truth_enc_signal_still_exempted_when_trusted(self):
+        engine = ScoringEngine(is_trusted_actor=lambda sig: True)
+        engine.submit(_sig(name="high_entropy_write", weight=10))
+        assert engine.current_score() == 0
 
 
 # ---------------------------------------------------------------------------

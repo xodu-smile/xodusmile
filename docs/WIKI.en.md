@@ -137,6 +137,7 @@ The brain.  A time-windowed weighted sum with named thresholds.
 | `@dataclass Signal` | `detector, name, weight, severity, message, metadata, timestamp`.  `metadata` carries `pid`, `path`, etc. |
 | `THRESHOLD_LOW=30, _MEDIUM=60, _HIGH=100, _CRITICAL=150` | Score boundaries. |
 | `SIGNAL_WINDOW_SECONDS=120` | Rolling-window length. |
+| `GROUND_TRUTH_ENCRYPTION` | **Trust-gate blind-spot fix** — a frozen set of signal names (`canary_modified`, `canary_deleted`, `magic_bytes_lost`, `suspicious_extension`, `ransom_note_spread`, `kernel_blocked_op`) that are **never exempted** by the actor-trust gate. Ransomware injected into (T1055) or masquerading as (T1036) a trusted process still gets scored when it produces these ground-truth encryption signals. |
 | `ScoringEngine.submit(signal)` | Append, evict expired, then call every listener with `(signal, score, level)`. |
 | `ScoringEngine.subscribe(listener)` | Register callback. Listener exceptions are caught so a bad listener cannot brick the engine. |
 | `ScoringEngine.current_score()` / `current_level()` / `recent_signals(limit)` / `reset()` | Used by dashboard and responder. |
@@ -356,34 +357,58 @@ Ransom-note detector. Polls watch directories every 2 seconds to find
 ransom-note files that malware drops after encrypting (HOW_TO_DECRYPT.txt,
 _readme.txt, RESTORE-MY-FILES.txt, *.hta, etc.).
 
+**Content-aware analysis:** Beyond filename pattern matching, the detector
+reads file content to check for ① BTC/ETH/Monero crypto wallet addresses,
+② `.onion` URLs, ③ "your files have been encrypted" extortion phrases, and
+④ payment/contact terms. Notes with arbitrary filenames such as `A7F3C.txt`
+are therefore still caught by content.
+
 | Surface / constant | Notes |
 |---|---|
 | `NOTE_PATTERNS` | Regex list — `how.*to.*decrypt`, `recover.*files`, `your.*files.*encrypted`, `ransom.*note`, `_readme.txt`, etc. (high-specificity patterns only). |
-| `SPREAD_DIR_THRESHOLD = 2` | Number of *distinct* directories above which notes count as a spread. |
+| `CONTENT_PATTERNS` | Content-inspection regexes — crypto wallet addresses, `.onion` URLs, extortion/payment phrases. |
+| `SPREAD_DIR_THRESHOLD = 3` | Number of *distinct* directories above which notes count as a spread (raised from 2 to **3**). |
 | `SPREAD_WINDOW_SEC = 60` | Time window within which notes are aggregated into a spread. |
-| `W_NOTE_SINGLE = 35` | Weight for a single note (HIGH). |
+| `W_NOTE_SINGLE = 35` | Weight for a single content-confirmed note (HIGH). |
 | `W_NOTE_SPREAD = 90` | Weight for multi-directory spread (CRITICAL). |
 | `RansomNoteDetector.run()` | First pass: baseline scan (ignore existing files); subsequent polls emit signals for new notes via `_handle_note()`. |
-| `_handle_note(path, now)` | Record note path in `_recent_dirs` dict, count spread. If spread ≥ 2, emit `ransom_note_spread` (CRITICAL); else `ransom_note_dropped` (HIGH, or CRITICAL if canary boost active). |
+| `_handle_note(path, now)` | Determine content-confirmed status → record path in `_recent_dirs` → count spread. **Content-confirmed notes across ≥ 3 dirs → `ransom_note_spread` (CRITICAL). Name-matched notes across ≥ 3 dirs → CRITICAL only when corroborated by real encryption activity (canary/mass_io).** Single content-confirmed = HIGH; name-only = MEDIUM hint only. |
 | `_on_engine_signal(sig, score, level)` | Listens for canary signals — when canary trips, a single note inside the next 30 seconds is upgraded to CRITICAL. |
 
 Cross-signal: canary trip triggers `_boost_active() → True`, which
 upgrades `ransom_note_dropped` to CRITICAL (weight `W_NOTE_SPREAD`).
+
+**False-positive suppression:** A name-only single note is deliberately
+kept at MEDIUM so a stray README.txt never auto-escalates. Content
+confirmation is the key promotion gate.
 
 ---
 
 ### 4.4 `detectors/process_cmdline.py`
 
 Win11-only WMI subscriber for new process creations.  Each new process
-runs through `RULES` — a list of regex-based `Rule` objects covering:
+runs through `RULES` — a list of regex-based `Rule` objects. Total rule
+count is now **33** (up from 22), covering:
 
-- **VSS deletion** — `vssadmin delete shadows`, `wmic shadowcopy delete`, `wbadmin delete catalog`, PowerShell `Get-WmiObject … shadowcopy … Remove-…`.
+- **VSS deletion / resize** — `vssadmin delete shadows`, `wmic shadowcopy delete`, `wbadmin delete catalog`, PowerShell `Get-WmiObject … shadowcopy … Remove-…`, **`vssadmin resize shadowstorage`**.
 - **BCD tampering** — `bcdedit … safeboot`, `recoveryenabled no`, `bootstatuspolicy ignoreallfailures`.
 - **Defender / SmartScreen disable** — `Set-MpPreference -DisableRealtimeMonitoring`, service stop on `WinDefend/Sense/WdNisSvc/WdFilter`, `Add-MpPreference -Exclusion*`, registry edits, SmartScreen disable.
 - **Anti-forensics** — `wevtutil cl`, `Clear-EventLog`, `fsutil usn deletejournal`, `cipher /w`.
 - **Defence shutdown** — `netsh advfirewall … state off`, `manage-bde -off`, `Disable-BitLocker`.
 - **Persistence** — `schtasks /create … /sc onlogon … /ru system`, Run/RunOnce registry writes.
 - **PowerShell abuse** — `-EncodedCommand <base64>`, in-memory downloaders, `-ExecutionPolicy bypass -WindowStyle hidden`.
+- **Living-off-the-land / LOLBin (11 new rules)**:
+  - `cipher_efs_encrypt` — `cipher /e` (abuse of built-in EFS encryption engine).
+  - `bitlocker_abuse_enable` — `manage-bde -on` / `Enable-BitLocker` (forced BitLocker encryption).
+  - `vssadmin_resize_shadowstorage` — shrink shadow storage to weaken recovery options.
+  - `certutil_download` — `certutil -urlcache -split -f` (file download LOLBin).
+  - `certutil_decode_payload` — `certutil -decode` (Base64 payload decode, T1218).
+  - `bitsadmin_transfer` — `bitsadmin /transfer` (T1197 BITS Jobs abuse).
+  - `esentutl_raw_copy` — `esentutl /y` (raw copy of locked files).
+  - `wmic_process_call_create` — `wmic process call create` (process creation bypass, T1047).
+  - `kernel_service_create` — `sc create type=kernel` (BYOVD — load a vulnerable kernel driver, T1543.003).
+  - `archive_password_staging` — `7z … -p` / `rar … -p` (double-extortion staging, T1560.001).
+  - `rclone_exfil` — `rclone copy/sync` (cloud exfiltration, T1567.002).
 
 | Surface | Notes |
 |---------|-------|
@@ -403,16 +428,20 @@ sits idle on `_stop_event.wait()` — the rest of the agent continues.
 
 `psutil`-based polling watcher, used to (a) catch processes WMI may
 miss, (b) detect parent/child LOLBin chains, (c) detect per-process I/O
-write bursts, and (d) feed the dashboard process table.
+write bursts, (d) **detect system-binary masquerade (T1036.005)**, and
+(e) feed the dashboard process table.
 
 | Surface | Notes |
 |---------|-------|
 | `ProcSnapshot` dataclass | `pid, ppid, name, cmdline, user, started_at, cpu_percent, rss_bytes, write_bytes, last_seen`. |
 | `SCRIPT_HOSTS` | Set of LOLBin script-host filenames (powershell, pwsh, cmd, wscript, cscript, mshta, regsvr32, rundll32, bitsadmin, certutil, msbuild, installutil). |
+| `CORE_SYSTEM_BINARIES` | Set of core system binary names targeted for masquerade detection (svchost.exe, lsass.exe, csrss.exe, etc.). |
+| `SYSTEM32_PATHS` | Expected legitimate execution paths (System32, SysWOW64). |
 | `SUSPICIOUS_CHAINS` | Map of `parent → set(child)` for Office, Adobe, browsers, explorer, OneDrive, … |
 | `ProcessWatcher.snapshot(limit=80)` | Sorted-by-recency dict list for `/api/processes`. |
 | `run()` | Initial baseline scan (no signals), then 1 Hz `_scan(initial=False)`. |
-| `_on_new_process(snap)` | (1) `evaluate_cmdline` rules; (2) parent/child chain check → `suspicious_parent_child` (weight 40, HIGH); (3) parent fan-out tracker → `child_fanout` (weight 30, MEDIUM) when ≥ 12 children in 5 s. |
+| `_on_new_process(snap)` | (1) `evaluate_cmdline` rules; (2) **`_check_masquerade`** — if a core system binary name runs outside System32/SysWOW64 (e.g., `%TEMP%\svchost.exe`), emits `process_masquerade` (weight 60, HIGH, T1036.005); (3) parent/child chain check → `suspicious_parent_child` (weight 40, HIGH); (4) parent fan-out tracker → `child_fanout` (weight 30, MEDIUM) when ≥ 12 children in 5 s. |
+| `_check_masquerade(snap)` | Emits `process_masquerade` when a name from `CORE_SYSTEM_BINARIES` runs from a path not under a `SYSTEM32_PATHS` prefix. |
 | `_check_write_burst(...)` | `process_write_burst` (weight 20, MEDIUM) when a single process writes ≥ 50 MB inside a 2 s window. |
 
 The watcher skips its own PID and drops PIDs no longer present from
@@ -492,6 +521,14 @@ technique IDs**.
 - `wevtutil_clear_log` → `T1070.001 Indicator Removal: Clear Windows Event Logs`
 - `schtasks_persistence` → `T1053.005 Scheduled Task/Job`
 - `powershell_downloader` → `T1059.001 PowerShell` + `T1105 Ingress Tool Transfer`
+- `process_masquerade` → `T1036.005 Masquerading: Match Legitimate Name or Location`
+- `trusted_process_encrypting` → `T1055 Process Injection`
+- `certutil_download`, `certutil_decode_payload` → `T1218 System Binary Proxy Execution`
+- `bitsadmin_transfer` → `T1197 BITS Jobs`
+- `kernel_service_create` → `T1543.003 Create or Modify System Process: Windows Service`
+- `wmic_process_call_create` → `T1047 Windows Management Instrumentation`
+- `archive_password_staging` → `T1560.001 Archive Collected Data: Archive via Utility`
+- `rclone_exfil` → `T1567.002 Exfiltration Over Web Service: Exfiltration to Cloud Storage`
 
 The dashboard and incident reports use this mapping to present
 standard technique names to SOC/IR teams.
@@ -551,24 +588,33 @@ A small Flask app, mounted in-process by `agent.py`.
 |-------|--------|---------|
 | `/` | GET | Render `templates/index.html`. |
 | `/api/status` | GET | `agent.status()` JSON. |
-| `/api/heartbeat` | GET | Liveness probe used by `watchdog_service` (200 OK). |
+| `/api/heartbeat` | GET | Liveness probe used by `watchdog_service` (200 OK). **Always open** — no auth required even when a token is set. |
 | `/api/events` | GET | Last 100 rows from `EventStore`. |
 | `/api/processes` | GET | `ProcessWatcher.snapshot(60)`. |
 | `/api/actions` | GET | `ProcessResponder.actions(100)`. |
-| `/api/reset` | POST | `engine.reset()`. |
-| `/api/kill` | POST `{pid, reason?}` | `responder.manual_kill`. |
-| `/api/release` | POST `{pid}` | `responder.manual_release`. |
+| `/api/reset` | POST | `engine.reset()`. **Auth required when token set.** |
+| `/api/kill` | POST `{pid, reason?}` | `responder.manual_kill`. **Auth required when token set.** |
+| `/api/release` | POST `{pid}` | `responder.manual_release`. **Auth required when token set.** |
 | `/api/reports` | GET | `incident_reporter.recent(100)`. |
 | `/api/reports/<filename>` | GET | Raw markdown body (`text/markdown`), 404 on miss/traversal. |
-| `/api/admin/health` | GET | System health snapshot (responder mode, driver connected, uptime, watch dirs, allowlist count). |
-| `/api/admin/mode` | POST `{mode:"off\|quarantine\|kill"}` | Change responder mode on-the-fly. |
-| `/api/admin/threats` | GET | Per-PID threat analysis (signals emitted by each process + ATT&CK techniques + score contribution). |
-| `/api/admin/allowlist` | GET | All allowlist entries (name, path, note, added_at). |
-| `/api/admin/allowlist` | POST `{value, kind:"name\|path", note?}` | Add allowlist entry. |
-| `/api/admin/allowlist` | DELETE `{value, kind:"name\|path"}` | Remove allowlist entry. |
+| `/api/admin/health` | GET | System health snapshot — responder mode, driver connected, uptime, watch dirs, allowlist count, **`auth_enabled`**, **integrations stats**. **Auth required when token set.** |
+| `/api/admin/mode` | POST `{mode:"off\|quarantine\|kill"}` | Change responder mode on-the-fly. **Auth required when token set.** |
+| `/api/admin/threats` | GET | Per-PID threat analysis (signals + ATT&CK techniques + score contribution). **Auth required when token set.** |
+| `/api/admin/allowlist` | GET | All allowlist entries. **Auth required when token set.** |
+| `/api/admin/allowlist` | POST `{value, kind:"name\|path", note?}` | Add allowlist entry. **Auth required when token set.** |
+| `/api/admin/allowlist` | DELETE `{value, kind:"name\|path"}` | Remove allowlist entry. **Auth required when token set.** |
+
+**Authentication:** When `auth_token` is configured, every endpoint marked
+"Auth required" must present one of:
+- Header: `X-API-Key: <token>`
+- Header: `Authorization: Bearer <token>`
+
+Read-only endpoints (`/api/status`, `/api/events`, etc.) are open by
+default; set `auth_required_for_reads = true` in the config to gate them
+too. `/api/heartbeat` is always open (watchdog liveness probe).
 
 **Administrator panel** — new collapsible "Administrator" section in the Flask UI:
-- **System health** — responder mode (off/quarantine/kill), minifilter connected, uptime, watch directory list, allowlist item count.
+- **System health** — responder mode (off/quarantine/kill), minifilter connected, uptime, watch directory list, allowlist item count, auth/integration status.
 - **Mode switcher** — POST `/api/admin/mode` to change mode on-the-fly (no restart needed).
 - **Per-PID threat breakdown** — which processes drove the score, each signal's ATT&CK technique, aggregated contribution.
 - **Allowlist editor** — UI form to add/remove entries, or manually edit `allowlist.json` and reload.
@@ -579,6 +625,43 @@ server with `use_reloader=False`.
 The HTML template adds a fixed-position toast container and polls
 `/api/reports` every 2.5 s; new entries spawn a toast that auto-dismisses
 after 10 s.
+
+---
+
+## 5b. Enterprise modules
+
+### `config.py`
+
+Central policy file loader. Auto-detects `ransomguard.toml` (Python 3.11+
+`tomllib`) or `ransomguard.json` in the working directory, or uses the
+path supplied by `--config <path>`.
+
+**Precedence: CLI flag > config file > built-in default.**
+
+| Section | Key fields |
+|---------|-----------|
+| `[general]` | `watch_dirs`, `responder_mode`, `enable_minifilter` |
+| `[dashboard]` | `host`, `port`, `auth_token`, `auth_required_for_reads` |
+| `[syslog]` | `enabled`, `host`, `port`, `protocol` (udp/tcp), `min_severity` |
+| `[webhook]` | `enabled`, `url`, `min_severity` |
+
+Secret environment variables (always win over the file):
+- `RANSOMGUARD_AUTH_TOKEN` — dashboard API token.
+- `RANSOMGUARD_WEBHOOK_URL` — enables webhook and sets the URL.
+- `RANSOMGUARD_SYSLOG_HOST` — enables syslog and sets the host.
+
+### `integrations.py`
+
+Async SIEM/alert forwarding worker. **Fail-open** design — an integration
+failure is logged but never propagates to the detection hot-path.
+
+| Integration | Protocol | Notes |
+|-------------|----------|-------|
+| **SIEM** | CEF over syslog (UDP or TCP) | Streams events in the standard format parsed by Splunk/QRadar/ArcSight/Sentinel. Only events at or above `min_severity` (default HIGH) are forwarded. |
+| **Webhook** | HTTPS JSON POST | Instant JSON push to Slack/Teams/PagerDuty/SOAR. `min_severity` default CRITICAL. |
+
+Zero external dependencies (standard library only). Integration failures
+are logged; the agent continues detecting normally.
 
 ---
 

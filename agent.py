@@ -17,6 +17,8 @@ from console import force_utf8
 from scoring import ScoringEngine, Signal, Severity
 from actor_trust import signal_actor_trusted
 from allowlist import Allowlist, combine_trust
+from config import Config
+import integrations
 import attack_map
 from event_store import EventStore
 from detectors.canary import CanaryDetector
@@ -47,9 +49,22 @@ class Agent:
                  notify_user: bool = True,
                  enable_tamper_protection: bool = True,
                  watchdog_pid: int | None = None,
-                 allowlist_path: str = "allowlist.json"):
+                 allowlist_path: str = "allowlist.json",
+                 auth_token: str = "",
+                 auth_required_for_reads: bool = False,
+                 forwarder=None):
         self._start_time = time.time()
         self._watch_dirs = list(watch_dirs)
+        # Dashboard auth token (empty → auth disabled; local-dev convenience).
+        # Consulted by dashboard.app to gate mutating/admin endpoints.
+        self.auth_token = auth_token or ""
+        # When True, read-only GET endpoints also require the token (the
+        # heartbeat probe always stays open for the watchdog).
+        self.auth_required_for_reads = bool(auth_required_for_reads)
+        # External SIEM/webhook forwarder (integrations.EventForwarder | None).
+        # Fed from _on_signal; runs its own background worker so network I/O
+        # never blocks the detection hot path.
+        self.forwarder = forwarder
         # Operator allowlist: third-party apps the admin explicitly trusts.  It
         # composes into the score's trust gate (its signals are exempted) and is
         # consulted by the responder as an extra never-kill layer.
@@ -127,6 +142,14 @@ class Agent:
         self.store.record(sig, score, level)
         if level == Severity.INFO:
             return
+        # Forward to external SIEM/webhook (non-blocking; the forwarder applies
+        # its own min-severity filter).  Wrapped so a misbehaving integration
+        # can never break detection/printing.
+        if self.forwarder is not None:
+            try:
+                self.forwarder.forward(sig.to_dict(), score, level.value)
+            except Exception as e:
+                print(f"[agent] forwarder error: {e}")
         bar = self._severity_bar(level)
         print(f"{bar} [{sig.detector}/{sig.name}] {sig.message}  "
               f"(weight={sig.weight}, total_score={score}, level={level.value})")
@@ -146,6 +169,11 @@ class Agent:
         print("  RansomGuard EDR — agent starting")
         print("=" * 60)
         self.canary.deploy()
+        if self.forwarder is not None:
+            try:
+                self.forwarder.start()
+            except Exception as e:
+                print(f"[agent] forwarder start failed: {e}")
         for d in self.detectors:
             d.start()
         print(f"[agent] {len(self.detectors)} detectors started "
@@ -184,6 +212,11 @@ class Agent:
             self.incident_reporter.close()
         except Exception as e:
             print(f"[agent] incident reporter close failed: {e}")
+        if self.forwarder is not None:
+            try:
+                self.forwarder.stop()
+            except Exception as e:
+                print(f"[agent] forwarder stop failed: {e}")
         print("[agent] stopped")
 
     def status(self) -> dict:
@@ -215,7 +248,7 @@ class Agent:
     def health(self) -> dict:
         """System-health snapshot for the administrator panel."""
         return {
-            "version": "1.1",
+            "version": "1.2",
             "uptime_seconds": round(time.time() - self._start_time, 1),
             "started_at": self._start_time,
             "responder_mode": self.responder.mode.value,
@@ -230,6 +263,10 @@ class Agent:
             "allowlist_count": len(self.allowlist.entries()),
             "current_score": self.engine.current_score(),
             "current_level": self.engine.current_level().value,
+            "auth_enabled": bool(self.auth_token),
+            "integrations": (self.forwarder.stats()
+                             if self.forwarder is not None
+                             else {"enabled": False}),
         }
 
     def threat_breakdown(self, limit: int = 200) -> dict:
@@ -305,20 +342,35 @@ class Agent:
 def parse_args():
     p = argparse.ArgumentParser(description="RansomGuard EDR agent")
     p.add_argument(
+        "--config", default=None,
+        help="Path to a ransomguard.toml/.json policy file. If omitted, "
+             "auto-detects ransomguard.toml/.json in the working directory. "
+             "CLI flags override file values; file values override built-in "
+             "defaults. Secrets (auth token, webhook url) can be injected via "
+             "RANSOMGUARD_AUTH_TOKEN / RANSOMGUARD_WEBHOOK_URL / "
+             "RANSOMGUARD_SYSLOG_HOST env vars (env wins over file).",
+    )
+    p.add_argument(
         "--watch", action="append", default=None,
         help="Directory to watch (repeatable). Defaults to ./test_watch_dir",
     )
-    p.add_argument("--db", default="detector.db", help="SQLite database path")
+    p.add_argument("--db", default=None, help="SQLite database path")
     p.add_argument(
         "--no-dashboard", action="store_true",
         help="Run agent only, without the web dashboard",
     )
     p.add_argument(
-        "--port", type=int, default=5000,
+        "--port", type=int, default=None,
         help="Dashboard port (default 5000)",
     )
     p.add_argument(
-        "--mode", default="kill",
+        "--auth-token", default=None,
+        help="Dashboard API token. Prefer the RANSOMGUARD_AUTH_TOKEN env var "
+             "or the config file so the secret isn't visible in the process "
+             "list. When set, mutating/admin endpoints require this token.",
+    )
+    p.add_argument(
+        "--mode", default=None,
         choices=[m.value for m in ResponderMode],
         help="Responder mode: off | quarantine | kill (default kill)",
     )
@@ -328,7 +380,7 @@ def parse_args():
              "(falls back to user-mode-only detection)",
     )
     p.add_argument(
-        "--reports-dir", default="reports",
+        "--reports-dir", default=None,
         help="Directory for markdown incident reports (default ./reports)",
     )
     p.add_argument(
@@ -346,7 +398,7 @@ def parse_args():
              "tamper-protected alongside the agent.",
     )
     p.add_argument(
-        "--allowlist", default="allowlist.json",
+        "--allowlist", default=None,
         help="JSON file of operator-trusted apps (name / path-prefix). "
              "Allowlisted processes are exempt from scoring and never killed.",
     )
@@ -356,21 +408,50 @@ def parse_args():
 def main():
     force_utf8()
     args = parse_args()
-    watch = args.watch or [str(Path.cwd() / "test_watch_dir")]
+
+    # Policy precedence: CLI flag > config file > built-in default.  The config
+    # file (auto-detected or via --config) lets a fleet ship one policy file;
+    # CLI flags still win for one-off overrides on a single host.
+    cfg = Config.load(args.config)
+
+    watch = args.watch or cfg.watch_dirs or [str(Path.cwd() / "test_watch_dir")]
     for d in watch:
         Path(d).mkdir(parents=True, exist_ok=True)
 
+    db_path = args.db or cfg.db_path
+    reports_dir = args.reports_dir or cfg.reports_dir
+    allowlist_path = args.allowlist or cfg.allowlist_path
+    mode = args.mode or cfg.responder_mode
+    port = args.port if args.port is not None else cfg.dashboard.port
+    auth_token = args.auth_token or cfg.dashboard.auth_token
+    # Boolean policies start from the config and a CLI "--no-*" flag turns off.
+    enable_minifilter = cfg.enable_minifilter and not args.no_minifilter
+    enable_tamper = cfg.enable_tamper_protection and not args.no_tamper_protection
+    notify_user = cfg.notify_user and not args.no_notify
+
+    forwarder = integrations.from_config(cfg)
+
     agent = Agent(
         watch,
-        db_path=args.db,
-        responder_mode=ResponderMode(args.mode),
-        enable_minifilter=not args.no_minifilter,
-        reports_dir=args.reports_dir,
-        notify_user=not args.no_notify,
-        enable_tamper_protection=not args.no_tamper_protection,
+        db_path=db_path,
+        responder_mode=ResponderMode(mode),
+        enable_minifilter=enable_minifilter,
+        reports_dir=reports_dir,
+        notify_user=notify_user,
+        enable_tamper_protection=enable_tamper,
         watchdog_pid=args.watchdog_pid,
-        allowlist_path=args.allowlist,
+        allowlist_path=allowlist_path,
+        auth_token=auth_token,
+        auth_required_for_reads=cfg.dashboard.auth_required_for_reads,
+        forwarder=forwarder,
     )
+    if cfg.source_path:
+        print(f"[agent] loaded config from {cfg.source_path}")
+    if auth_token:
+        print("[agent] dashboard authentication ENABLED (token required)")
+    else:
+        print("[agent] dashboard authentication DISABLED "
+              "(set RANSOMGUARD_AUTH_TOKEN for production)")
     agent.start()
 
     if not args.no_dashboard:
@@ -378,11 +459,11 @@ def main():
         import threading
         app = create_app(agent)
         threading.Thread(
-            target=lambda: app.run(host="127.0.0.1", port=args.port,
+            target=lambda: app.run(host=cfg.dashboard.host, port=port,
                                    debug=False, use_reloader=False),
             daemon=True,
         ).start()
-        print(f"[agent] dashboard at http://127.0.0.1:{args.port}")
+        print(f"[agent] dashboard at http://{cfg.dashboard.host}:{port}")
 
     stop_flag = {"v": False}
 

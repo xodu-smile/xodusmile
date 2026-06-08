@@ -135,6 +135,7 @@ SIGINT/SIGTERM 핸들러 설치 → 종료 신호까지 idle → `agent.stop()`.
 | `@dataclass Signal` | `detector, name, weight, severity, message, metadata, timestamp`. `metadata` 에 `pid`, `path` 등 추가. |
 | `THRESHOLD_LOW=30, _MEDIUM=60, _HIGH=100, _CRITICAL=150` | 점수 경계. |
 | `SIGNAL_WINDOW_SECONDS=120` | 슬라이딩 윈도우 길이. |
+| `GROUND_TRUTH_ENCRYPTION` | **신뢰 게이트 사각지대 차단용 신호 집합** — `canary_modified`, `canary_deleted`, `magic_bytes_lost`, `suspicious_extension`, `ransom_note_spread`, `kernel_blocked_op`. 이 집합에 속한 신호는 행위자 신뢰(actor-trust) 게이트에 의해 **절대 면제되지 않는다** — 신뢰된 프로세스(svchost 등)에 인젝션(T1055)되거나 위장(T1036)된 랜섬웨어가 이 신호를 유발해도 항상 채점된다. |
 | `ScoringEngine.submit(signal)` | append → 만료 제거 → 모든 리스너에 `(signal, score, level)` 통지. |
 | `ScoringEngine.subscribe(listener)` | 콜백 등록. 리스너 예외는 잡아두어 한 리스너의 실패가 엔진을 마비시키지 않게 한다. |
 | `ScoringEngine.current_score()` / `current_level()` / `recent_signals(limit)` / `reset()` | 대시보드/리스폰더에서 사용. |
@@ -346,34 +347,55 @@ True)` 가 가중치를 1.5배 한다.
 협박문(ransom note) 탐지기. 감시 폴더를 2초마다 폴링해서 암호화 후
 랜섬웨어가 각 폴더에 떨어뜨리는 협박문 파일을 감지한다.
 
+**내용 기반 분석 (content-aware)**: 파일명 패턴 매칭 외에 파일 내용을 직접
+읽어 ① BTC/ETH/Monero 암호화폐 지갑 주소, ② `.onion` URL, ③ "your files have
+been encrypted" 류 협박 문구, ④ 결제·연락처 용어를 탐지한다. 따라서 파일명이
+`A7F3C.txt` 처럼 무작위여도 **내용으로 협박문임을 확인**한다.
+
 | 항목 | 설명 |
 |------|------|
 | `NOTE_PATTERNS` | 정규식 목록 — `how.*to.*decrypt`, `recover.*files`, `your.*files.*encrypted`, `ransom.*note`, `_readme.txt`, 등 특이도 높은 패턴. |
-| `SPREAD_DIR_THRESHOLD = 2` | 이 개 이상 *서로 다른* 디렉터리에서 노트가 나오면 spread. |
+| `CONTENT_PATTERNS` | 내용 검사 정규식 — 암호화폐 지갑 주소, `.onion` URL, 협박·결제 문구. |
+| `SPREAD_DIR_THRESHOLD = 3` | 이 개 이상 *서로 다른* 디렉터리에서 노트가 나오면 spread (기존 2 → **3** 으로 상향). |
 | `SPREAD_WINDOW_SEC = 60` | 이 시간 내에 모인 노트만 spread 로 집계. |
-| `W_NOTE_SINGLE = 35` | 단일 협박문 가중치 (HIGH). |
+| `W_NOTE_SINGLE = 35` | 단일 내용 확인 협박문 가중치 (HIGH). |
 | `W_NOTE_SPREAD = 90` | 다중 디렉터리 spread 가중치 (CRITICAL). |
 | `RansomNoteDetector.run()` | 1차: baseline scan (기존 파일 무시); 이후 폴링에서 새 노트 감지 시 `_handle_note()`. |
-| `_handle_note(path, now)` | 노트 경로를 `_recent_dirs` dict에 추가 → spread count 판정. spread ≥ 2 이면 `ransom_note_spread` (CRITICAL), 아니면 `ransom_note_dropped` (HIGH, 또는 canary 부스트 중이면 CRITICAL). |
+| `_handle_note(path, now)` | 내용 확인 여부 판정 → 노트 경로를 `_recent_dirs` dict에 추가 → spread count 판정. **내용 확인된 노트가 ≥ 3 디렉터리에 spread 이면 `ransom_note_spread` (CRITICAL); 이름만 매칭되고 ≥ 3 dirs에 spread이면 실제 암호화 활동(canary/mass_io)이 동반될 때만 CRITICAL**. 단일 내용 확인 = HIGH; 이름만 = MEDIUM 힌트. |
 | `_on_engine_signal(sig, score, level)` | canary 신호 구독 — canary 트립 시 30초 내 단일 노트도 CRITICAL로 강화. |
 
 크로스 시그널: `canary` 트립이 감지되면 `_boost_active()` 가 True 반환해서
 단일 노트도 `ransom_note_dropped` 대신 CRITICAL로 발화 (weight W_NOTE_SPREAD).
+
+**오탐 억제 설계**: 이름만 매칭된 단발 노트는 MEDIUM 힌트로만 — 이름 패턴과
+우연히 일치하는 정상 파일(README.txt 등)로 인한 오탐 억제. 내용 확인이 핵심 승격 조건.
 
 ---
 
 ### 4.4 `detectors/process_cmdline.py`
 
 Win11 전용 WMI 프로세스 생성 구독자. 각 새 프로세스는 `RULES` —
-정규식 기반 `Rule` 목록을 거친다:
+정규식 기반 `Rule` 목록을 거친다 (총 **33개 룰**, 기존 22개에서 증가):
 
-- **VSS 삭제** — `vssadmin delete shadows`, `wmic shadowcopy delete`, `wbadmin delete catalog`, PowerShell `Get-WmiObject … shadowcopy … Remove-…`.
+- **VSS 삭제/리사이즈** — `vssadmin delete shadows`, `wmic shadowcopy delete`, `wbadmin delete catalog`, PowerShell `Get-WmiObject … shadowcopy … Remove-…`, **`vssadmin resize shadowstorage`**.
 - **BCD 조작** — `bcdedit … safeboot`, `recoveryenabled no`, `bootstatuspolicy ignoreallfailures`.
 - **Defender / SmartScreen 무력화** — `Set-MpPreference -DisableRealtimeMonitoring`, `WinDefend/Sense/WdNisSvc/WdFilter` 서비스 stop, `Add-MpPreference -Exclusion*`, 레지스트리 편집, SmartScreen 비활성화.
 - **Anti-forensics** — `wevtutil cl`, `Clear-EventLog`, `fsutil usn deletejournal`, `cipher /w`.
 - **방어 인프라 종료** — `netsh advfirewall … state off`, `manage-bde -off`, `Disable-BitLocker`.
 - **지속화** — `schtasks /create … /sc onlogon … /ru system`, Run/RunOnce 레지스트리 쓰기.
 - **PowerShell 남용** — `-EncodedCommand <base64>`, 인메모리 다운로더, `-ExecutionPolicy bypass -WindowStyle hidden`.
+- **Living-off-the-land (신규 11개 룰)**:
+  - `cipher_efs_encrypt` — `cipher /e` (내장 EFS 암호화 엔진 악용).
+  - `bitlocker_abuse_enable` — `manage-bde -on` / `Enable-BitLocker` (BitLocker 강제 암호화).
+  - `vssadmin_resize_shadowstorage` — 섀도 스토리지 축소로 복구 수단 약화.
+  - `certutil_download` — `certutil -urlcache -split -f` (파일 다운로드 LOLBin).
+  - `certutil_decode_payload` — `certutil -decode` (Base64 페이로드 복호화).
+  - `bitsadmin_transfer` — `bitsadmin /transfer` (T1197 BITS 악용).
+  - `esentutl_raw_copy` — `esentutl /y` (잠긴 파일 raw 복사).
+  - `wmic_process_call_create` — `wmic process call create` (프로세스 생성 우회).
+  - `kernel_service_create` — `sc create type=kernel` (BYOVD — 취약 커널 드라이버 로드).
+  - `archive_password_staging` — `7z … -p` / `rar … -p` (이중 갈취 스테이징).
+  - `rclone_exfil` — `rclone copy/sync` (클라우드 유출, T1567.002).
 
 | API | 설명 |
 |-----|------|
@@ -392,17 +414,20 @@ Win11 전용 WMI 프로세스 생성 구독자. 각 새 프로세스는 `RULES` 
 ### 4.5 `detectors/process_watcher.py`
 
 `psutil` 폴링 기반 감시기. WMI 가 놓치는 프로세스 보강, 부모-자식
-LOLBin 체인 탐지, 단일 프로세스 I/O 버스트, 대시보드 프로세스 테이블
-공급을 담당.
+LOLBin 체인 탐지, 단일 프로세스 I/O 버스트, **시스템 바이너리 위장 탐지**,
+대시보드 프로세스 테이블 공급을 담당.
 
 | API | 설명 |
 |-----|------|
 | `ProcSnapshot` dataclass | `pid, ppid, name, cmdline, user, started_at, cpu_percent, rss_bytes, write_bytes, last_seen`. |
 | `SCRIPT_HOSTS` | LOLBin 스크립트 호스트 이름 (powershell, pwsh, cmd, wscript, cscript, mshta, regsvr32, rundll32, bitsadmin, certutil, msbuild, installutil). |
+| `CORE_SYSTEM_BINARIES` | 위장 탐지 대상 핵심 시스템 이름 목록 (svchost.exe, lsass.exe, csrss.exe 등). |
+| `SYSTEM32_PATHS` | 정상 실행 경로 집합 (System32, SysWOW64). |
 | `SUSPICIOUS_CHAINS` | `parent → set(child)` 매핑. Office, Adobe, 브라우저, explorer, OneDrive 등. |
 | `ProcessWatcher.snapshot(limit=80)` | 최근 본 순으로 정렬된 dict 리스트 (`/api/processes` 용). |
 | `run()` | 베이스라인 1패스(시그널 없음) → 1 Hz `_scan(initial=False)`. |
-| `_on_new_process(snap)` | (1) `evaluate_cmdline` 룰 적용; (2) 부모-자식 체인 → `suspicious_parent_child` (weight 40, HIGH); (3) 동일 부모 fan-out → `child_fanout` (weight 30, MEDIUM), 5s 내 자식 12개+. |
+| `_on_new_process(snap)` | (1) `evaluate_cmdline` 룰 적용; (2) **`_check_masquerade`** — 시스템 바이너리 이름을 달고 System32/SysWOW64 밖에서 실행 시 `process_masquerade` (weight 60, HIGH, T1036.005) emit; (3) 부모-자식 체인 → `suspicious_parent_child` (weight 40, HIGH); (4) 동일 부모 fan-out → `child_fanout` (weight 30, MEDIUM), 5s 내 자식 12개+. |
+| `_check_masquerade(snap)` | `%TEMP%\svchost.exe` 처럼 핵심 시스템 이름이 정상 경로 밖에서 실행될 때 `process_masquerade` 시그널 emit. |
 | `_check_write_burst(...)` | `process_write_burst` (weight 20, MEDIUM) — 단일 프로세스가 2s 윈도우에 50MB+ 쓰기. |
 
 자기 PID 는 건너뛰고, 사라진 PID 는 `_seen`/`_last_io` 에서 제거해
@@ -477,6 +502,14 @@ canary/협박문확산 같은 단발 고신뢰 신호는 허용 목록으로도 
 - `wevtutil_clear_log` → `T1070.001 Indicator Removal: Clear Windows Event Logs`
 - `schtasks_persistence` → `T1053.005 Scheduled Task/Job`
 - `powershell_downloader` → `T1059.001 PowerShell` + `T1105 Ingress Tool Transfer`
+- `process_masquerade` → `T1036.005 Masquerading: Match Legitimate Name or Location`
+- `trusted_process_encrypting` → `T1055 Process Injection`
+- `certutil_download`, `certutil_decode_payload` → `T1218 System Binary Proxy Execution`
+- `bitsadmin_transfer` → `T1197 BITS Jobs`
+- `kernel_service_create` → `T1543.003 Create or Modify System Process: Windows Service`
+- `wmic_process_call_create` → `T1047 Windows Management Instrumentation`
+- `archive_password_staging` → `T1560.001 Archive Collected Data: Archive via Utility`
+- `rclone_exfil` → `T1567.002 Exfiltration Over Web Service: Exfiltration to Cloud Storage`
 
 대시보드 및 보고서가 이 매핑을 사용해서 SOC/IR 팀과 표준 기법명으로 소통.
 
@@ -533,24 +566,33 @@ canary/협박문확산 같은 단발 고신뢰 신호는 허용 목록으로도 
 |-------|--------|------|
 | `/` | GET | `templates/index.html` 렌더. |
 | `/api/status` | GET | `agent.status()` JSON. |
-| `/api/heartbeat` | GET | `watchdog_service` 가 호출하는 라이브니스 프로브 (200 OK). |
+| `/api/heartbeat` | GET | `watchdog_service` 가 호출하는 라이브니스 프로브 (200 OK). **항상 공개** — 토큰이 설정돼 있어도 인증 불필요. |
 | `/api/events` | GET | `EventStore` 최근 100개. |
 | `/api/processes` | GET | `ProcessWatcher.snapshot(60)`. |
 | `/api/actions` | GET | `ProcessResponder.actions(100)`. |
-| `/api/reset` | POST | `engine.reset()`. |
-| `/api/kill` | POST `{pid, reason?}` | `responder.manual_kill`. |
-| `/api/release` | POST `{pid}` | `responder.manual_release`. |
+| `/api/reset` | POST | `engine.reset()`. **토큰 설정 시 인증 필요.** |
+| `/api/kill` | POST `{pid, reason?}` | `responder.manual_kill`. **토큰 설정 시 인증 필요.** |
+| `/api/release` | POST `{pid}` | `responder.manual_release`. **토큰 설정 시 인증 필요.** |
 | `/api/reports` | GET | `incident_reporter.recent(100)`. |
 | `/api/reports/<filename>` | GET | Raw markdown 본문 (`text/markdown`), 미존재/트래버설 시 404. |
-| `/api/admin/health` | GET | 시스템 상태 snapshot (responder mode, 드라이버 연결, uptime, 감시 폴더, 허용 목록 개수). |
-| `/api/admin/mode` | POST `{mode:"off\|quarantine\|kill"}` | Responder 모드 변경 (실시간). |
-| `/api/admin/threats` | GET | PID 별 위협 분석 (각 프로세스가 낸 신호 + ATT&CK 기법 + 점수 기여도). |
-| `/api/admin/allowlist` | GET | 허용 목록 전체 항목 (name, path, note, added_at). |
-| `/api/admin/allowlist` | POST `{value, kind:"name\|path", note?}` | 허용 목록 항목 추가. |
-| `/api/admin/allowlist` | DELETE `{value, kind:"name\|path"}` | 허용 목록 항목 삭제. |
+| `/api/admin/health` | GET | 시스템 상태 snapshot — responder mode, 드라이버 연결, uptime, 감시 폴더, 허용 목록 개수, **`auth_enabled`**, **통합(integrations) 통계**. **토큰 설정 시 인증 필요.** |
+| `/api/admin/mode` | POST `{mode:"off\|quarantine\|kill"}` | Responder 모드 변경 (실시간). **토큰 설정 시 인증 필요.** |
+| `/api/admin/threats` | GET | PID 별 위협 분석 (각 프로세스가 낸 신호 + ATT&CK 기법 + 점수 기여도). **토큰 설정 시 인증 필요.** |
+| `/api/admin/allowlist` | GET | 허용 목록 전체 항목. **토큰 설정 시 인증 필요.** |
+| `/api/admin/allowlist` | POST `{value, kind:"name\|path", note?}` | 허용 목록 항목 추가. **토큰 설정 시 인증 필요.** |
+| `/api/admin/allowlist` | DELETE `{value, kind:"name\|path"}` | 허용 목록 항목 삭제. **토큰 설정 시 인증 필요.** |
+
+**인증 (Dashboard Authentication)**: `auth_token` 이 설정되면 위 표에서 "인증 필요"
+로 표시된 모든 엔드포인트(변경성 + 모든 `/api/admin/*`)에 다음 중 하나가 있어야 한다:
+- 헤더: `X-API-Key: <token>`
+- 헤더: `Authorization: Bearer <token>`
+
+읽기 전용 엔드포인트(`/api/status`, `/api/events` 등)는 기본적으로 공개.
+`auth_required_for_reads = true` 설정 시 읽기 API 도 토큰 요구.
+`/api/heartbeat` 는 watchdog 용이므로 **항상 공개**.
 
 **관리자 패널** — Flask UI 내 새 collapsible 섹션 "관리자 패널 (Administrator)":
-- **시스템 상태** — responder mode (off/quarantine/kill), minifilter 연결 상태, uptime, 감시 폴더 목록, 허용 목록 항목 수.
+- **시스템 상태** — responder mode (off/quarantine/kill), minifilter 연결 상태, uptime, 감시 폴더 목록, 허용 목록 항목 수, 인증/통합 상태.
 - **모드 전환** — POST `/api/admin/mode` 로 on-the-fly mode 변경 (재시작 불필요).
 - **PID 별 위협 분석** — 어느 프로세스가 점수를 올렸는지, 각 신호의 ATT&CK 기법, 기여도 합산.
 - **허용 목록 편집** — UI 폼으로 항목 추가/제거 (또는 `allowlist.json` 수동 편집 + reload).
@@ -560,6 +602,40 @@ canary/협박문확산 같은 단발 고신뢰 신호는 허용 목록으로도 
 
 HTML 템플릿은 고정 위치 토스트 컨테이너를 두고 2.5s 마다
 `/api/reports` 를 폴링; 새 항목은 토스트로 띄워 10s 후 자동 dismiss.
+
+---
+
+## 5b. 기업 모듈
+
+### `config.py`
+
+중앙 정책 파일 로더. `ransomguard.toml` (Python 3.11+ `tomllib`) 또는
+`ransomguard.json` 을 자동 탐지하거나 `--config <path>` 로 명시 지정한다.
+
+우선순위: **CLI 플래그 > 설정 파일 > 내장 기본값**.
+
+| 섹션 | 주요 키 |
+|------|---------|
+| `[general]` | `watch_dirs`, `responder_mode`, `enable_minifilter` |
+| `[dashboard]` | `host`, `port`, `auth_token`, `auth_required_for_reads` |
+| `[syslog]` | `enabled`, `host`, `port`, `protocol` (udp/tcp), `min_severity` |
+| `[webhook]` | `enabled`, `url`, `min_severity` |
+
+비밀 환경변수 (파일 값을 항상 덮어씀):
+- `RANSOMGUARD_AUTH_TOKEN` — 대시보드 API 토큰.
+- `RANSOMGUARD_WEBHOOK_URL` — Webhook 활성화 + URL.
+- `RANSOMGUARD_SYSLOG_HOST` — syslog 활성화 + 호스트.
+
+### `integrations.py`
+
+SIEM/알림 통합 비동기 워커. 탐지 핫패스를 절대 막지 않는 **fail-open** 설계.
+
+| 통합 | 프로토콜 | 설명 |
+|------|---------|------|
+| **SIEM** | CEF over syslog (UDP/TCP) | Splunk/QRadar/ArcSight/Sentinel 에서 파싱하는 표준 포맷으로 이벤트 스트리밍. `min_severity` 이상만 전송 (기본 HIGH). |
+| **Webhook** | HTTPS JSON POST | Slack/Teams/PagerDuty/SOAR 로 즉시 JSON 알림. `min_severity` 이상만 (기본 CRITICAL). |
+
+외부 의존성 없음(표준 라이브러리만). 통합 장애는 로그만 남기고 에이전트는 계속 동작.
 
 ---
 

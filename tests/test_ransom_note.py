@@ -1,342 +1,269 @@
 """
-Tests for detectors.ransom_note
----------------------------------
-Covers is_ransom_note_name, RansomNoteDetector._scan behavior (drop / spread /
-initial-baseline / size guard).
+Tests for detectors.ransom_note (content-aware redesign)
+--------------------------------------------------------
+Covers:
+  - is_ransom_note_name (filename patterns)
+  - analyze_note_content (content-based detection — the new capability)
+  - RansomNoteDetector: single confirmed / name-only / content-only / spread
+    (content-confirmed AND corroborated paths) / baseline / size guard.
 No watchdog / psutil required.
 """
 
 import pytest
-from pathlib import Path
 
 from detectors.ransom_note import (
     MAX_NOTE_BYTES,
     SPREAD_DIR_THRESHOLD,
     RansomNoteDetector,
     is_ransom_note_name,
+    analyze_note_content,
 )
-from scoring import ScoringEngine, Severity
+from scoring import ScoringEngine, Signal, Severity
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
+# A realistic ransom note body: crypto address + onion + extortion phrase +
+# payment + contact + threat → strongly content-confirmed.
+RANSOM_BODY = (
+    "All your files have been encrypted!\n"
+    "To recover your files send 0.5 bitcoin to "
+    "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq\n"
+    "Then contact us at decrypt-help@protonmail.com\n"
+    "Or visit http://abcdef1234567klmnopqrstuvwxyz234567abcdefghij234567ab.onion\n"
+    "Do not rename or modify the files or you will lose them permanently.\n"
+)
+
 
 def _make_detector(engine, dirs):
     return RansomNoteDetector(engine, [str(d) for d in dirs])
 
 
+def _collect(engine):
+    received = []
+    engine.subscribe(lambda sig, score, level: received.append(sig))
+    return received
+
+
 # ---------------------------------------------------------------------------
-# is_ransom_note_name — positive cases
+# is_ransom_note_name
 # ---------------------------------------------------------------------------
 
-class TestIsRansomNoteNamePositives:
+class TestIsRansomNoteName:
     @pytest.mark.parametrize("filename", [
-        "HOW_TO_DECRYPT.txt",
-        "_readme.txt",
-        "RESTORE-MY-FILES.txt",
-        "!!!READ_ME.txt",
-        "DECRYPT_INSTRUCTIONS.html",
-        "YOUR FILES ARE ENCRYPTED.txt",
-        "how_to_decrypt.txt",
-        "HOW TO DECRYPT YOUR FILES.html",
-        "RECOVER_MY_FILES.txt",
-        "!!!RESTORE_FILES!!!.txt",
-        "decrypt_info.txt",
-        "ransom_note.txt",
-        "READ_ME_FOR_DECRYPT.txt",
-        "recovery_key.txt",
+        "HOW_TO_DECRYPT.txt", "_readme.txt", "RESTORE-MY-FILES.txt",
+        "!!!READ_ME.txt", "DECRYPT_INSTRUCTIONS.html",
+        "YOUR FILES ARE ENCRYPTED.txt", "RECOVER_MY_FILES.txt",
+        "decrypt_info.txt", "ransom_note.txt", "recovery_key.txt",
         "UNLOCK_YOUR_FILES.txt",
     ])
     def test_positive(self, filename):
-        assert is_ransom_note_name(filename) is True, (
-            f"Expected {filename!r} to be recognised as a ransom note"
-        )
+        assert is_ransom_note_name(filename) is True
 
-
-# ---------------------------------------------------------------------------
-# is_ransom_note_name — negative cases
-# ---------------------------------------------------------------------------
-
-class TestIsRansomNoteNameNegatives:
     @pytest.mark.parametrize("filename", [
-        "report.docx",
-        "license.txt",
-        "notes.txt",
-        "readme.md",
-        "photo.jpg",
-        "invoice_2024.pdf",
-        "project_plan.xlsx",
-        "backup.zip",
-        "README",
-        "setup.exe",
+        "report.docx", "license.txt", "notes.txt", "readme.md",
+        "photo.jpg", "invoice_2024.pdf", "backup.zip", "README", "setup.exe",
     ])
     def test_negative(self, filename):
-        assert is_ransom_note_name(filename) is False, (
-            f"Expected {filename!r} NOT to be recognised as a ransom note"
-        )
+        assert is_ransom_note_name(filename) is False
 
 
 # ---------------------------------------------------------------------------
-# _scan(initial=False) — emits ransom_note_dropped on single new note
+# analyze_note_content — the new content-based capability (widened scope)
 # ---------------------------------------------------------------------------
 
-class TestScanDropsSingleNote:
-    def test_single_note_in_one_dir_emits_ransom_note_dropped(self, tmp_path):
-        dir_a = tmp_path / "dir_a"
-        dir_a.mkdir()
-        engine = ScoringEngine()
-        det = _make_detector(engine, [dir_a])
+class TestAnalyzeContent:
+    def test_full_ransom_body_is_confirmed(self):
+        v = analyze_note_content(RANSOM_BODY)
+        assert v.confirmed is True
+        assert "crypto_address" in v.indicators
+        assert "encryption_phrase" in v.indicators
 
-        received = []
-        engine.subscribe(lambda sig, score, level: received.append(sig))
+    def test_btc_plus_phrase_is_confirmed(self):
+        body = ("Your files are encrypted. Pay bitcoin to "
+                "1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2 to decrypt your files.")
+        assert analyze_note_content(body).confirmed is True
 
-        note = dir_a / "HOW_TO_DECRYPT.txt"
-        note.write_text("Pay here", encoding="utf-8")
+    def test_benign_license_not_confirmed(self):
+        body = ("MIT License\n\nPermission is hereby granted, free of charge, "
+                "to any person obtaining a copy of this software.")
+        assert analyze_note_content(body).confirmed is False
 
+    def test_benign_readme_not_confirmed(self):
+        assert analyze_note_content("Build with make; run with ./app").confirmed is False
+
+    def test_security_doc_without_crypto_not_confirmed(self):
+        """An IR/security doc full of encryption words but NO crypto/onion
+        address must NOT be content-confirmed (false-positive guard)."""
+        body = ("Incident response: if your files are encrypted, do not rename "
+                "them. Contact soc@corp.com to decrypt. All data is encrypted "
+                "at rest. Ransom payment is never advised.")
+        assert analyze_note_content(body).confirmed is False
+
+    def test_lone_btc_address_not_confirmed(self):
+        """A wallet address alone (e.g. a crypto backup file) isn't a note."""
+        v = analyze_note_content("1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2")
+        assert v.confirmed is False  # strong indicator present but score < 3
+
+    def test_empty_not_confirmed(self):
+        assert analyze_note_content("").confirmed is False
+
+
+# ---------------------------------------------------------------------------
+# Single note classification
+# ---------------------------------------------------------------------------
+
+class TestSingleNote:
+    def test_content_confirmed_note_is_high(self, tmp_path):
+        d = tmp_path / "a"; d.mkdir()
+        engine = ScoringEngine(); det = _make_detector(engine, [d])
+        received = _collect(engine)
+        (d / "HOW_TO_DECRYPT.txt").write_text(RANSOM_BODY, encoding="utf-8")
         det._scan(initial=False)
+        sigs = [s for s in received if s.name == "ransom_note_dropped"]
+        assert sigs and sigs[0].severity == Severity.HIGH
+        assert sigs[0].metadata["content_confirmed"] is True
 
-        sig_names = [s.name for s in received]
-        assert "ransom_note_dropped" in sig_names
-
-    def test_ransom_note_dropped_severity_is_high(self, tmp_path):
-        dir_a = tmp_path / "dir_a"
-        dir_a.mkdir()
-        engine = ScoringEngine()
-        det = _make_detector(engine, [dir_a])
-
-        received = []
-        engine.subscribe(lambda sig, score, level: received.append(sig))
-
-        (dir_a / "HOW_TO_DECRYPT.txt").write_text("Pay", encoding="utf-8")
+    def test_content_only_random_name_is_detected(self, tmp_path):
+        """The headline fix: a note with an arbitrary name is caught by content."""
+        d = tmp_path / "a"; d.mkdir()
+        engine = ScoringEngine(); det = _make_detector(engine, [d])
+        received = _collect(engine)
+        (d / "A7F3C9.txt").write_text(RANSOM_BODY, encoding="utf-8")
         det._scan(initial=False)
+        assert any(s.name == "ransom_note_dropped" for s in received)
 
-        drop_sigs = [s for s in received if s.name == "ransom_note_dropped"]
-        assert drop_sigs
-        assert drop_sigs[0].severity == Severity.HIGH
+    def test_name_only_weak_content_is_medium(self, tmp_path):
+        d = tmp_path / "a"; d.mkdir()
+        engine = ScoringEngine(); det = _make_detector(engine, [d])
+        received = _collect(engine)
+        (d / "HOW_TO_DECRYPT.txt").write_text("hello", encoding="utf-8")
+        det._scan(initial=False)
+        sigs = [s for s in received if s.name == "ransom_note_dropped"]
+        assert sigs and sigs[0].severity == Severity.MEDIUM
+        assert sigs[0].metadata["content_confirmed"] is False
 
     def test_same_note_not_reported_twice(self, tmp_path):
-        dir_a = tmp_path / "dir_a"
-        dir_a.mkdir()
-        engine = ScoringEngine()
-        det = _make_detector(engine, [dir_a])
-
-        received = []
-        engine.subscribe(lambda sig, score, level: received.append(sig))
-
-        (dir_a / "HOW_TO_DECRYPT.txt").write_text("Pay", encoding="utf-8")
+        d = tmp_path / "a"; d.mkdir()
+        engine = ScoringEngine(); det = _make_detector(engine, [d])
+        received = _collect(engine)
+        (d / "HOW_TO_DECRYPT.txt").write_text(RANSOM_BODY, encoding="utf-8")
         det._scan(initial=False)
         det._scan(initial=False)
-
-        # Should only report once
         assert sum(1 for s in received if s.name == "ransom_note_dropped") == 1
 
 
 # ---------------------------------------------------------------------------
-# _scan — spread across multiple directories emits ransom_note_spread
+# Spread — now requires content confirmation OR corroboration, and >= 3 dirs
 # ---------------------------------------------------------------------------
 
-class TestScanSpread:
-    def test_notes_in_two_dirs_emit_ransom_note_spread(self, tmp_path):
-        dir_a = tmp_path / "dir_a"
-        dir_b = tmp_path / "dir_b"
-        dir_a.mkdir()
-        dir_b.mkdir()
-        engine = ScoringEngine()
-        det = _make_detector(engine, [dir_a, dir_b])
+class TestSpread:
+    def test_threshold_is_three(self):
+        assert SPREAD_DIR_THRESHOLD == 3
 
-        received = []
-        engine.subscribe(lambda sig, score, level: received.append(sig))
+    def test_content_confirmed_across_three_dirs_is_critical(self, tmp_path):
+        dirs = [tmp_path / x for x in ("a", "b", "c")]
+        for d in dirs:
+            d.mkdir()
+        engine = ScoringEngine(); det = _make_detector(engine, dirs)
+        received = _collect(engine)
+        for d in dirs:
+            (d / "HOW_TO_DECRYPT.txt").write_text(RANSOM_BODY, encoding="utf-8")
+            det._scan(initial=False)
+        spread = [s for s in received if s.name == "ransom_note_spread"]
+        assert spread and spread[0].severity == Severity.CRITICAL
+        assert spread[0].metadata["directories_confirmed"] >= SPREAD_DIR_THRESHOLD
 
-        (dir_a / "HOW_TO_DECRYPT.txt").write_text("Pay", encoding="utf-8")
-        det._scan(initial=False)
+    def test_two_confirmed_dirs_is_not_spread(self, tmp_path):
+        dirs = [tmp_path / x for x in ("a", "b")]
+        for d in dirs:
+            d.mkdir()
+        engine = ScoringEngine(); det = _make_detector(engine, dirs)
+        received = _collect(engine)
+        for d in dirs:
+            (d / "HOW_TO_DECRYPT.txt").write_text(RANSOM_BODY, encoding="utf-8")
+            det._scan(initial=False)
+        assert not any(s.name == "ransom_note_spread" for s in received)
 
-        (dir_b / "_readme.txt").write_text("Pay ransom", encoding="utf-8")
-        det._scan(initial=False)
+    def test_name_only_spread_without_encryption_is_not_critical(self, tmp_path):
+        """The leniency fix: name-only notes across many dirs no longer auto-CRITICAL."""
+        dirs = [tmp_path / x for x in ("a", "b", "c", "d")]
+        for d in dirs:
+            d.mkdir()
+        engine = ScoringEngine(); det = _make_detector(engine, dirs)
+        received = _collect(engine)
+        for d in dirs:
+            (d / "HOW_TO_DECRYPT.txt").write_text("please pay", encoding="utf-8")
+            det._scan(initial=False)
+        assert not any(s.name == "ransom_note_spread" for s in received)
 
-        sig_names = [s.name for s in received]
-        assert "ransom_note_spread" in sig_names
-
-    def test_ransom_note_spread_severity_is_critical(self, tmp_path):
-        dir_a = tmp_path / "dir_a"
-        dir_b = tmp_path / "dir_b"
-        dir_a.mkdir()
-        dir_b.mkdir()
-        engine = ScoringEngine()
-        det = _make_detector(engine, [dir_a, dir_b])
-
-        received = []
-        engine.subscribe(lambda sig, score, level: received.append(sig))
-
-        (dir_a / "HOW_TO_DECRYPT.txt").write_text("Pay", encoding="utf-8")
-        det._scan(initial=False)
-        (dir_b / "_readme.txt").write_text("Pay", encoding="utf-8")
-        det._scan(initial=False)
-
-        spread_sigs = [s for s in received if s.name == "ransom_note_spread"]
-        assert spread_sigs
-        assert spread_sigs[0].severity == Severity.CRITICAL
-
-    def test_spread_metadata_includes_directories_affected(self, tmp_path):
-        dir_a = tmp_path / "dir_a"
-        dir_b = tmp_path / "dir_b"
-        dir_a.mkdir()
-        dir_b.mkdir()
-        engine = ScoringEngine()
-        det = _make_detector(engine, [dir_a, dir_b])
-
-        received = []
-        engine.subscribe(lambda sig, score, level: received.append(sig))
-
-        (dir_a / "HOW_TO_DECRYPT.txt").write_text("Pay", encoding="utf-8")
-        det._scan(initial=False)
-        (dir_b / "_readme.txt").write_text("Pay", encoding="utf-8")
-        det._scan(initial=False)
-
-        spread_sigs = [s for s in received if s.name == "ransom_note_spread"]
-        assert spread_sigs
-        assert spread_sigs[0].metadata.get("directories_affected", 0) >= SPREAD_DIR_THRESHOLD
-
-    def test_spread_dir_threshold_is_two(self):
-        assert SPREAD_DIR_THRESHOLD == 2
+    def test_name_only_spread_with_encryption_activity_is_critical(self, tmp_path):
+        """Name-only spread DOES escalate when corroborated by real encryption."""
+        dirs = [tmp_path / x for x in ("a", "b", "c")]
+        for d in dirs:
+            d.mkdir()
+        engine = ScoringEngine(); det = _make_detector(engine, dirs)
+        received = _collect(engine)
+        # Inject a non-canary encryption signal (no boost) to corroborate.
+        engine.submit(Signal(detector="mass_io", name="magic_bytes_lost",
+                             weight=12, severity=Severity.HIGH,
+                             message="x", metadata={"path": "x"}))
+        for d in dirs:
+            (d / "HOW_TO_DECRYPT.txt").write_text("please pay", encoding="utf-8")
+            det._scan(initial=False)
+        spread = [s for s in received if s.name == "ransom_note_spread"]
+        assert spread and spread[0].metadata["trigger"] == "correlated"
 
 
 # ---------------------------------------------------------------------------
-# _scan(initial=True) — registers baseline WITHOUT emitting
+# Baseline + size guard + non-note files
 # ---------------------------------------------------------------------------
 
-class TestScanInitialBaseline:
-    def test_initial_scan_does_not_emit_for_existing_notes(self, tmp_path):
-        dir_a = tmp_path / "dir_a"
-        dir_a.mkdir()
-        engine = ScoringEngine()
-        det = _make_detector(engine, [dir_a])
-
-        received = []
-        engine.subscribe(lambda sig, score, level: received.append(sig))
-
-        # Pre-existing note before initial scan
-        (dir_a / "HOW_TO_DECRYPT.txt").write_text("Pre-existing", encoding="utf-8")
+class TestBaselineAndGuards:
+    def test_initial_scan_does_not_emit(self, tmp_path):
+        d = tmp_path / "a"; d.mkdir()
+        engine = ScoringEngine(); det = _make_detector(engine, [d])
+        received = _collect(engine)
+        (d / "HOW_TO_DECRYPT.txt").write_text(RANSOM_BODY, encoding="utf-8")
         det._scan(initial=True)
-
         assert received == []
 
-    def test_after_initial_scan_new_note_is_still_reported(self, tmp_path):
-        dir_a = tmp_path / "dir_a"
-        dir_a.mkdir()
-        engine = ScoringEngine()
-        det = _make_detector(engine, [dir_a])
-
-        received = []
-        engine.subscribe(lambda sig, score, level: received.append(sig))
-
-        # Pre-existing note
-        (dir_a / "HOW_TO_DECRYPT.txt").write_text("Old", encoding="utf-8")
+    def test_new_note_after_baseline_is_reported(self, tmp_path):
+        d = tmp_path / "a"; d.mkdir()
+        engine = ScoringEngine(); det = _make_detector(engine, [d])
+        received = _collect(engine)
+        (d / "HOW_TO_DECRYPT.txt").write_text(RANSOM_BODY, encoding="utf-8")
         det._scan(initial=True)
-
-        # New note created after baseline
-        (dir_a / "RESTORE-MY-FILES.txt").write_text("New", encoding="utf-8")
+        (d / "RESTORE-MY-FILES.txt").write_text(RANSOM_BODY, encoding="utf-8")
         det._scan(initial=False)
-
-        sig_names = [s.name for s in received]
-        assert "ransom_note_dropped" in sig_names
-
-
-# ---------------------------------------------------------------------------
-# Size guard — notes larger than MAX_NOTE_BYTES are ignored
-# ---------------------------------------------------------------------------
-
-class TestSizeLimitGuard:
-    def test_note_larger_than_max_bytes_is_ignored(self, tmp_path):
-        dir_a = tmp_path / "dir_a"
-        dir_a.mkdir()
-        engine = ScoringEngine()
-        det = _make_detector(engine, [dir_a])
-
-        received = []
-        engine.subscribe(lambda sig, score, level: received.append(sig))
-
-        oversized_note = dir_a / "HOW_TO_DECRYPT.txt"
-        oversized_note.write_bytes(b"X" * (MAX_NOTE_BYTES + 1))
-        det._scan(initial=False)
-
-        assert received == []
-
-    def test_note_at_exactly_max_bytes_is_ignored(self, tmp_path):
-        dir_a = tmp_path / "dir_a"
-        dir_a.mkdir()
-        engine = ScoringEngine()
-        det = _make_detector(engine, [dir_a])
-
-        received = []
-        engine.subscribe(lambda sig, score, level: received.append(sig))
-
-        # stat().st_size > MAX_NOTE_BYTES → exactly MAX is excluded
-        note = dir_a / "HOW_TO_DECRYPT.txt"
-        note.write_bytes(b"X" * (MAX_NOTE_BYTES + 1))
-        det._scan(initial=False)
-
-        assert received == []
-
-    def test_note_smaller_than_max_bytes_is_reported(self, tmp_path):
-        dir_a = tmp_path / "dir_a"
-        dir_a.mkdir()
-        engine = ScoringEngine()
-        det = _make_detector(engine, [dir_a])
-
-        received = []
-        engine.subscribe(lambda sig, score, level: received.append(sig))
-
-        note = dir_a / "HOW_TO_DECRYPT.txt"
-        note.write_bytes(b"Pay us " * 10)  # well under 65536
-        det._scan(initial=False)
-
         assert any(s.name == "ransom_note_dropped" for s in received)
 
-
-# ---------------------------------------------------------------------------
-# Non-note files are ignored
-# ---------------------------------------------------------------------------
-
-class TestNonNoteFilesIgnored:
-    def test_regular_readme_is_not_reported(self, tmp_path):
-        dir_a = tmp_path / "dir_a"
-        dir_a.mkdir()
-        engine = ScoringEngine()
-        det = _make_detector(engine, [dir_a])
-
-        received = []
-        engine.subscribe(lambda sig, score, level: received.append(sig))
-
-        (dir_a / "readme.md").write_text("Normal readme", encoding="utf-8")
+    def test_oversized_note_ignored(self, tmp_path):
+        d = tmp_path / "a"; d.mkdir()
+        engine = ScoringEngine(); det = _make_detector(engine, [d])
+        received = _collect(engine)
+        (d / "HOW_TO_DECRYPT.txt").write_bytes(b"X" * (MAX_NOTE_BYTES + 1))
         det._scan(initial=False)
-
         assert received == []
 
-    def test_license_file_is_not_reported(self, tmp_path):
-        dir_a = tmp_path / "dir_a"
-        dir_a.mkdir()
-        engine = ScoringEngine()
-        det = _make_detector(engine, [dir_a])
-
-        received = []
-        engine.subscribe(lambda sig, score, level: received.append(sig))
-
-        (dir_a / "license.txt").write_text("MIT License", encoding="utf-8")
+    def test_regular_readme_not_reported(self, tmp_path):
+        d = tmp_path / "a"; d.mkdir()
+        engine = ScoringEngine(); det = _make_detector(engine, [d])
+        received = _collect(engine)
+        (d / "readme.md").write_text("Normal readme", encoding="utf-8")
         det._scan(initial=False)
-
         assert received == []
 
-    def test_photo_jpg_is_not_reported(self, tmp_path):
-        dir_a = tmp_path / "dir_a"
-        dir_a.mkdir()
-        engine = ScoringEngine()
-        det = _make_detector(engine, [dir_a])
-
-        received = []
-        engine.subscribe(lambda sig, score, level: received.append(sig))
-
-        (dir_a / "photo.jpg").write_bytes(b"\xff\xd8\xff" + b"\x00" * 50)
+    def test_license_not_reported(self, tmp_path):
+        d = tmp_path / "a"; d.mkdir()
+        engine = ScoringEngine(); det = _make_detector(engine, [d])
+        received = _collect(engine)
+        (d / "license.txt").write_text("MIT License", encoding="utf-8")
         det._scan(initial=False)
+        assert received == []
 
+    def test_photo_not_reported(self, tmp_path):
+        d = tmp_path / "a"; d.mkdir()
+        engine = ScoringEngine(); det = _make_detector(engine, [d])
+        received = _collect(engine)
+        (d / "photo.jpg").write_bytes(b"\xff\xd8\xff" + b"\x00" * 50)
+        det._scan(initial=False)
         assert received == []

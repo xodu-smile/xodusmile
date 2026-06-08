@@ -21,6 +21,35 @@ from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from typing import Deque, Dict, List, Optional, Tuple
 
+# 위장(masquerade) 탐지용: 이 이름의 핵심 시스템 바이너리는 *오직* System32/
+# SysWOW64 에서만 실행된다.  랜섬웨어는 never-kill 면역과 신뢰를 가로채려고
+# 자신을 %TEMP%\svchost.exe 처럼 이 이름으로 복사해 띄운다(T1036.005).  이름이
+# 이 집합에 있는데 이미지 경로가 시스템 디렉터리 밖이면 사칭이다.
+_SYSTEM_BINARY_NAMES = {
+    "smss.exe", "csrss.exe", "wininit.exe", "services.exe", "lsass.exe",
+    "lsaiso.exe", "winlogon.exe", "fontdrvhost.exe", "dwm.exe",
+    "svchost.exe", "spoolsv.exe", "audiodg.exe", "conhost.exe",
+    "taskhostw.exe", "runtimebroker.exe", "wmiprvse.exe", "sihost.exe",
+    "dllhost.exe", "ctfmon.exe", "searchindexer.exe",
+}
+_SYSROOT = os.environ.get("SystemRoot", r"C:\Windows")
+_SYSTEM_DIRS = tuple(
+    os.path.normcase(os.path.join(_SYSROOT, sub))
+    for sub in ("System32", "SysWOW64")
+)
+
+
+def is_masquerading(name: str, exe_path: str) -> bool:
+    """``name`` 이 핵심 시스템 바이너리 이름인데 이미지가 시스템 디렉터리 밖에서
+    실행 중이면 True(사칭).  경로를 못 읽으면(빈 문자열) fail-safe 로 False —
+    추측이 아니라 *untrusted 경로라는 적극적 증거* 가 있을 때만 사칭으로 본다."""
+    if (name or "").lower() not in _SYSTEM_BINARY_NAMES:
+        return False
+    if not exe_path:
+        return False
+    p = os.path.normcase(exe_path)
+    return not any(p.startswith(d) for d in _SYSTEM_DIRS)
+
 try:
     import psutil
     HAS_PSUTIL = True
@@ -85,6 +114,7 @@ class ProcSnapshot:
     cmdline: str
     user: str
     started_at: float
+    exe: str = ""
     cpu_percent: float = 0.0
     rss_bytes: int = 0
     write_bytes: int = 0
@@ -158,7 +188,7 @@ class ProcessWatcher(Detector):
         now = time.time()
         current_pids: set = set()
 
-        attrs = ["pid", "ppid", "name", "cmdline", "username",
+        attrs = ["pid", "ppid", "name", "cmdline", "username", "exe",
                  "create_time", "cpu_percent", "memory_info", "io_counters"]
 
         for proc in psutil.process_iter(attrs=attrs, ad_value=None):
@@ -177,6 +207,7 @@ class ProcessWatcher(Detector):
             cmdline = " ".join(cmd_list) if isinstance(cmd_list, list) else str(cmd_list)
             ppid = info.get("ppid") or 0
             user = (info.get("username") or "").strip()
+            exe = (info.get("exe") or "").strip()
             started = info.get("create_time") or now
             mem = info.get("memory_info")
             rss = getattr(mem, "rss", 0) if mem else 0
@@ -190,7 +221,7 @@ class ProcessWatcher(Detector):
             if is_new:
                 snap = ProcSnapshot(
                     pid=pid, ppid=ppid, name=name, cmdline=cmdline,
-                    user=user, started_at=started, cpu_percent=cpu,
+                    user=user, started_at=started, exe=exe, cpu_percent=cpu,
                     rss_bytes=rss, write_bytes=write_bytes, last_seen=now,
                 )
                 self._seen[pid] = snap
@@ -219,6 +250,28 @@ class ProcessWatcher(Detector):
         for sig in evaluate_cmdline(self.name, snap.name, snap.cmdline,
                                     snap.pid, snap.ppid):
             self.emit(sig)
+
+        # 1b) 시스템 바이너리 위장(masquerade) — %TEMP%\svchost.exe 처럼 핵심
+        #     시스템 이름을 달았지만 System32/SysWOW64 밖에서 실행되는 사칭.
+        #     랜섬웨어가 신뢰/never-kill 면역을 가로채는 흔한 수법(T1036.005).
+        #     pid 를 실어 보내므로 responder 가 곧바로 그 PID 를 차단/종료한다
+        #     (이름 기반 never-kill 은 경로 검증으로 이미 면역이 벗겨진 상태).
+        if is_masquerading(snap.name, snap.exe):
+            self.emit(Signal(
+                detector=self.name,
+                name="process_masquerade",
+                weight=60,
+                severity=Severity.HIGH,
+                message=f"System-binary masquerade: {snap.name} running from "
+                        f"{snap.exe or '?'} (not System32/SysWOW64)",
+                metadata={
+                    "pid": snap.pid,
+                    "ppid": snap.ppid,
+                    "process": snap.name,
+                    "image": snap.exe,
+                    "cmdline": snap.cmdline[:256],
+                },
+            ))
 
         # 2) 부모-자식 chain 검사 (Win11 LOLBin pattern, 정확 매치)
         parent = self._seen.get(snap.ppid)

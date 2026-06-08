@@ -76,6 +76,17 @@ _CMD_SHELL        = _t("T1059.003", "Command and Scripting Interpreter: Windows 
 _INGRESS_TOOL     = _t("T1105", "Ingress Tool Transfer", "Command and Control", "명령·제어")
 _MASQUERADING     = _t("T1036.005", "Masquerading: Match Legitimate Name or Location",
                        "Defense Evasion", "방어 회피")
+_PROC_INJECTION   = _t("T1055", "Process Injection", "Defense Evasion", "방어 회피")
+_PROXY_EXEC       = _t("T1218", "System Binary Proxy Execution",
+                       "Defense Evasion", "방어 회피")
+_BITS_JOBS        = _t("T1197", "BITS Jobs", "Defense Evasion", "방어 회피")
+_CREATE_SERVICE   = _t("T1543.003", "Create or Modify System Process: Windows Service",
+                       "Persistence", "지속성")
+_WMI              = _t("T1047", "Windows Management Instrumentation", "Execution", "실행")
+_ARCHIVE_UTIL     = _t("T1560.001", "Archive Collected Data: Archive via Utility",
+                       "Collection", "수집")
+_EXFIL_CLOUD      = _t("T1567.002", "Exfiltration Over Web Service: Exfiltration to "
+                       "Cloud Storage", "Exfiltration", "유출")
 
 
 # 신호 이름 -> ATT&CK 기법.  탐지기에서 emit 하는 Signal.name 과 1:1 또는 1:N.
@@ -105,6 +116,26 @@ _SIGNAL_TECHNIQUES: Dict[str, List[Technique]] = {
     "bcdedit_ignore_failures":      [_INHIBIT_RECOVERY],
     "bcdedit_safeboot":             [_INHIBIT_RECOVERY],
     "bitlocker_disable":            [_INHIBIT_RECOVERY],
+    "vssadmin_resize_shadowstorage": [_INHIBIT_RECOVERY],
+
+    # --- 내장 도구를 암호화 엔진으로 악용 (living-off-the-land, Impact) ---
+    "cipher_efs_encrypt":      [_DATA_ENCRYPTED],
+    "bitlocker_abuse_enable":  [_DATA_ENCRYPTED, _INHIBIT_RECOVERY],
+
+    # --- LOLBin 프록시 실행 / 스테이징 (Defense Evasion / C2) ---
+    "certutil_download":        [_PROXY_EXEC, _INGRESS_TOOL],
+    "certutil_decode_payload":  [_PROXY_EXEC, _DEOBFUSCATE],
+    "bitsadmin_transfer":       [_BITS_JOBS, _INGRESS_TOOL],
+    "esentutl_raw_copy":        [_PROXY_EXEC],
+    "wmic_process_call_create": [_WMI],
+    "kernel_service_create":    [_CREATE_SERVICE],
+
+    # --- 이중 갈취: 데이터 스테이징 / 유출 ---
+    "archive_password_staging": [_ARCHIVE_UTIL],
+    "rclone_exfil":             [_EXFIL_CLOUD],
+
+    # --- 정상 프로세스 내부에서의 암호화 = 인젝션/위장 증거 ---
+    "trusted_process_encrypting": [_PROC_INJECTION, _DATA_ENCRYPTED],
 
     # --- 방어 무력화 (Defense Evasion) ---
     "defender_disable_realtime":     [_IMPAIR_DEFENSES, _SERVICE_STOP],

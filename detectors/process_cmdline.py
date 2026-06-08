@@ -192,6 +192,107 @@ RULES: List[Rule] = [
         message="BitLocker disablement (pre-encryption staging)",
     ),
 
+    # === 정상/내장 도구를 *암호화 엔진* 으로 악용 (T1486) =====================
+    # 자체 암호화 루틴 대신 OS 에 내장된 신뢰 도구로 파일을 암호화하는
+    # "living-off-the-land" 랜섬웨어.  바이너리가 서명돼 있어 정적 탐지를 피한다.
+    Rule(
+        name="cipher_efs_encrypt",
+        pattern=_rx(r"\bcipher(\.exe)?\s+/e\b"),
+        weight=45,
+        severity=Severity.HIGH,
+        message="EFS encryption via built-in cipher /e (living-off-the-land)",
+    ),
+    Rule(
+        name="bitlocker_abuse_enable",
+        pattern=_rx(
+            r"(manage-bde(\.exe)?\s+.*-on\b"
+            r"|enable-bitlocker\b"
+            r"|manage-bde(\.exe)?\s+-on\b)"
+        ),
+        # HIGH(not CRITICAL): enabling BitLocker is also a legitimate IT action,
+        # so we score it strongly and corroborate via the window rather than
+        # single-handedly forcing a CRITICAL score.  Still pre-encryption-grade.
+        weight=60,
+        severity=Severity.HIGH,
+        message="BitLocker volume encryption being enabled (possible ransomware "
+                "abusing native disk encryption)",
+    ),
+    Rule(
+        name="vssadmin_resize_shadowstorage",
+        pattern=_rx(r"vssadmin(\.exe)?\s+resize\s+shadowstorage"),
+        weight=55,
+        severity=Severity.HIGH,
+        message="VSS shadowstorage resized (shadow-copy starvation / recovery sabotage)",
+    ),
+
+    # === LOLBin: 신뢰 시스템 바이너리를 프록시 실행/스테이징에 악용 ============
+    Rule(
+        name="certutil_download",
+        pattern=_rx(
+            r"certutil(\.exe)?\s+.*-(urlcache|verifyctl)\b.*\bhttp"
+            r"|certutil(\.exe)?\s+.*-urlcache\b.*-f\b"
+        ),
+        weight=45,
+        severity=Severity.HIGH,
+        message="certutil used to download a file (LOLBin ingress tool transfer)",
+    ),
+    Rule(
+        name="certutil_decode_payload",
+        pattern=_rx(r"certutil(\.exe)?\s+.*-(decode|decodehex)\b"),
+        weight=35,
+        severity=Severity.MEDIUM,
+        message="certutil decoding a payload (LOLBin deobfuscation/staging)",
+    ),
+    Rule(
+        name="bitsadmin_transfer",
+        pattern=_rx(r"bitsadmin(\.exe)?\s+.*/transfer\b"),
+        weight=35,
+        severity=Severity.MEDIUM,
+        message="bitsadmin background transfer (LOLBin download via BITS jobs)",
+    ),
+    Rule(
+        name="esentutl_raw_copy",
+        pattern=_rx(r"esentutl(\.exe)?\s+.*/y\b"),
+        weight=35,
+        severity=Severity.MEDIUM,
+        message="esentutl raw copy of a locked file (LOLBin file access)",
+    ),
+    Rule(
+        name="wmic_process_call_create",
+        pattern=_rx(r"wmic(\.exe)?\s+.*process\s+call\s+create"),
+        weight=40,
+        severity=Severity.HIGH,
+        message="WMIC process call create (LOLBin proxy execution / lateral spawn)",
+    ),
+
+    # === BYOVD — 취약 드라이버를 적재해 커널에서 EDR 을 무력화 (T1543.003) =====
+    Rule(
+        name="kernel_service_create",
+        pattern=_rx(r"sc(\.exe)?\s+create\b.*type=\s*kernel"),
+        weight=55,
+        severity=Severity.HIGH,
+        message="Kernel-mode service created via sc.exe (possible BYOVD to kill EDR)",
+    ),
+
+    # === 이중 갈취 — 암호화 전 데이터 스테이징/유출 (T1560.001 / T1567.002) ====
+    Rule(
+        name="archive_password_staging",
+        pattern=_rx(
+            r"\b(7z|7za|7zr|rar|winrar|winzip)(\.exe)?\s+a\b.*\s-p"
+        ),
+        weight=30,
+        severity=Severity.MEDIUM,
+        message="Password-protected archive being built (data staging / "
+                "double-extortion exfil prep)",
+    ),
+    Rule(
+        name="rclone_exfil",
+        pattern=_rx(r"\brclone(\.exe)?\s+(copy|sync|move|cat)\b"),
+        weight=35,
+        severity=Severity.MEDIUM,
+        message="rclone bulk data movement (possible cloud exfiltration)",
+    ),
+
     # --- 지속화 (T1053.005 schtasks, T1547.001 Run keys) ---
     Rule(
         name="schtasks_persistence",
