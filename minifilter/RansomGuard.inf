@@ -1,0 +1,104 @@
+;
+; RansomGuard.inf - Installation file for the RansomGuard minifilter.
+;
+; Install by right-clicking the .inf in Explorer and choosing Install, or
+; via PowerShell:
+;     rundll32.exe setupapi.dll,InstallHinfSection DefaultInstall 132 .\RansomGuard.inf
+; then start the service with:
+;     sc start RansomGuard
+;
+; Uninstall with DefaultUninstall, or the bundled uninstall_driver.ps1.
+;
+
+[Version]
+Signature   = "$Windows NT$"
+Class       = "ActivityMonitor"
+ClassGuid   = {b86dff51-a31e-4bac-b3cf-e8cfe75c9fc2}
+Provider    = %ManufacturerName%
+DriverVer   = 05/21/2026,1.0.0.0
+CatalogFile = RansomGuard.cat
+PnpLockdown = 1
+
+[DestinationDirs]
+DefaultDestDir          = 12
+RansomGuard.DriverFiles = 12   ; %windir%\system32\drivers
+
+;
+; Default install / uninstall sections
+;
+
+[DefaultInstall.NTamd64]
+OptionDesc = %ServiceDescription%
+CopyFiles  = RansomGuard.DriverFiles
+
+[DefaultInstall.NTamd64.Services]
+AddService = %ServiceName%,,RansomGuard.Service
+
+[DefaultUninstall.NTamd64]
+DelFiles = RansomGuard.DriverFiles
+LegacyUninstall  = 1
+
+[DefaultUninstall.NTamd64.Services]
+DelService = %ServiceName%,0x200      ; SPSVCINST_STOPSERVICE
+
+[DefaultInstall.NTarm64]
+OptionDesc = %ServiceDescription%
+CopyFiles  = RansomGuard.DriverFiles
+
+[DefaultInstall.NTarm64.Services]
+AddService = %ServiceName%,,RansomGuard.Service
+
+[DefaultUninstall.NTarm64]
+DelFiles = RansomGuard.DriverFiles
+LegacyUninstall  = 1
+
+[DefaultUninstall.NTarm64.Services]
+DelService = %ServiceName%,0x200      ; SPSVCINST_STOPSERVICE
+
+;
+; Service installation
+;
+
+[RansomGuard.Service]
+DisplayName    = %ServiceName%
+Description    = %ServiceDescription%
+ServiceBinary  = %12%\%DriverName%.sys
+Dependencies   = "FltMgr"
+ServiceType    = 2                    ; SERVICE_FILE_SYSTEM_DRIVER
+StartType      = 3                    ; SERVICE_DEMAND_START
+ErrorControl   = 1                    ; SERVICE_ERROR_NORMAL
+LoadOrderGroup = "FSFilter Activity Monitor"
+AddReg         = RansomGuard.AddRegistry
+
+[RansomGuard.AddRegistry]
+HKR,"Parameters\Instances","DefaultInstance",0x00000000,%DefaultInstance%
+HKR,"Parameters\Instances\"%Instance1.Name%,"Altitude",0x00000000,%Instance1.Altitude%
+HKR,"Parameters\Instances\"%Instance1.Name%,"Flags",0x00010001,%Instance1.Flags%
+
+;
+; Files to copy
+;
+
+[SourceDisksFiles]
+RansomGuard.sys = 1
+
+[SourceDisksNames]
+1 = %DiskId1%
+
+[RansomGuard.DriverFiles]
+RansomGuard.sys
+
+;
+; Localizable strings
+;
+
+[Strings]
+ManufacturerName    = "RansomGuard"
+ServiceName         = "RansomGuard"
+ServiceDescription  = "RansomGuard ransomware EDR minifilter"
+DriverName          = "RansomGuard"
+DiskId1             = "RansomGuard Installation Disk"
+DefaultInstance     = "RansomGuard Instance"
+Instance1.Name      = "RansomGuard Instance"
+Instance1.Altitude  = "385201"
+Instance1.Flags     = 0x0

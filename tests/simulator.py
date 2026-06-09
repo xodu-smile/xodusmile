@@ -22,6 +22,8 @@ from pathlib import Path
 # 부모 디렉토리를 import path에 추가 (단독 실행 가능하도록)
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from console import force_utf8
+
 
 def populate_targets(directory: Path, count: int = 30) -> list[Path]:
     """탐지 대상이 될 더미 사용자 파일 생성."""
@@ -116,6 +118,7 @@ def simulate_bcd_tamper(agent) -> None:
 
 
 def main():
+    force_utf8()
     parser = argparse.ArgumentParser(
         description="Detection engine test simulator (NO real encryption)"
     )

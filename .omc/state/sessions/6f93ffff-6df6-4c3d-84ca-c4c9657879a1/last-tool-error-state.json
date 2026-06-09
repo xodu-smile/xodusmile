@@ -1,0 +1,7 @@
+{
+  "tool_name": "Read",
+  "tool_input_preview": "{\"file_path\":\"/tmp/claude-1000/-home-namaek2-ransomware-detector/6f93ffff-6df6-4c3d-84ca-c4c9657879a1/tasks/a9456019e982c89ba.output\"}",
+  "error": "File content (271.8KB) exceeds maximum allowed size (256KB). Use offset and limit parameters to read specific portions of the file, or search for specific content instead of reading the whole file.",
+  "timestamp": "2026-06-08T18:32:21.678Z",
+  "retry_count": 1
+}

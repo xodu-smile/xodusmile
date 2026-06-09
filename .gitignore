@@ -1,0 +1,54 @@
+# =====================================================================
+#  RansomGuard EDR — .gitignore
+#  핵심 원칙: 아키텍처별 빌드 산출물(x64/ARM64)과 로컬 환경은 커밋하지
+#  않는다. 팀원은 각자 호스트 아키텍처로 build_driver.ps1 을 돌려
+#  로컬 빌드한다.
+# =====================================================================
+
+# ── Python ──────────────────────────────────────────────────────────
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# ── 런타임 데이터 / 출력물 ──────────────────────────────────────────
+*.db
+*.db-journal
+reports/
+testsign_result.txt
+.lab.json          # lab.ps1 로컬 설정 (watch 경로 등) — 머신마다 다름
+
+# ── 커널 드라이버 빌드 산출물 (아키텍처 고유 — 로컬 빌드할 것) ──────
+#  build/x64/... 와 build/ARM64/... 의 .sys/.cat 은 서로 호환되지 않음.
+minifilter/build/
+minifilter/packages/
+minifilter/nuget.exe
+*.sys
+*.cat
+*.pdb
+
+# ── Visual Studio / MSBuild 중간물 ──────────────────────────────────
+.vs/
+minifilter/x64/
+minifilter/ARM64/
+minifilter/Debug/
+minifilter/Release/
+*.user
+*.aps
+*.opensdf
+*.sdf
+*.suo
+*.tlog
+*.lastbuildstate
+
+# ── 머신 고유 헬퍼 (절대경로 하드코딩 — build_driver.ps1 로 대체) ──
+minifilter/build_arm64.bat
+
+# ── OS 노이즈 ───────────────────────────────────────────────────────
+Thumbs.db
+desktop.ini
+.DS_Store

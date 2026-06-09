@@ -1,0 +1,8 @@
+# 개발/테스트 의존성 (Windows 11 전용 빌드 위에서 실행).
+#   pip install -r requirements.txt -r requirements-dev.txt
+#
+# pytest 스위트는 repo 루트에서 `pytest` 로 실행한다.  순수 로직 테스트
+# (scoring/attack_map/allowlist/mass_io/ransom_note)는 어느 OS에서나 돌고,
+# psutil/flask/wmi/pywin32 가 필요한 테스트는 자동으로 skip 된다.
+-r requirements.txt
+pytest>=8.0

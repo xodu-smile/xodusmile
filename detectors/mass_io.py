@@ -56,6 +56,20 @@ TARGET_EXTENSIONS = {
     ".psd", ".dwg",
 }
 
+# 오탐 방지 — *원래부터* 무작위(고엔트로피)처럼 보이는 형식들.  압축·이미지·
+# 미디어 파일은 정상이어도 엔트로피가 7.5+ 라서, 이들을 단순히 "고엔트로피라
+# 암호화 의심"으로 보면 정상 재저장(사진 편집, 동영상 변환, 압축본 갱신)이
+# high_entropy_write 오탐을 낸다.  이 형식들은 엔트로피 단독 신호에서 제외하고
+# (matched magic 이 사라지는 magic_bytes_lost 나 의심 확장자 변경 같은 *변화*
+# 기반 신호로만 본다).  매직바이트 테이블에 없는 미디어(mp3/mp4/avi/mov/mkv)가
+# 특히 오탐의 주범이었다.  incident_report._HIGH_ENTROPY_SKIP_EXTS 와 같은 의도.
+NATIVE_HIGH_ENTROPY_EXTS = {
+    ".zip", ".rar", ".7z", ".gz", ".bz2", ".xz", ".cab", ".jar", ".apk",
+    ".jpg", ".jpeg", ".png", ".gif", ".webp", ".heic",
+    ".mp3", ".aac", ".ogg", ".flac", ".m4a",
+    ".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v",
+}
+
 # 가중치
 W_HIGH_ENTROPY_WRITE = 8       # 단일 파일이 고엔트로피로 변함
 W_MAGIC_LOST = 12              # 매직바이트 소실
@@ -69,12 +83,39 @@ BURST_WINDOW_SEC = 10
 BURST_THRESHOLD = 15           # 10초 안에 15개 이상 변경
 MAX_SAMPLE_BYTES = 4096        # 엔트로피 계산용 샘플링 크기
 
+# Canary 교차 신호 부스트 (WIKI §4.3): canary 가 트립하면 랜섬웨어가 거의
+# 확실하므로, 짧은 시간 동안 엔트로피 기준을 낮추고(7.5→6.8) mass_io 시그널
+# 가중치를 키워서 점수가 임계를 더 빨리 넘게 한다.
+CANARY_BOOST_WINDOW = 30.0      # canary 트립 후 부스트 유지 시간(초)
+CANARY_BOOST_MULTIPLIER = 1.5   # 부스트 중 가중치 배수
+ENTROPY_THRESHOLD_BOOST = 6.8   # 부스트 중 낮춘 엔트로피 기준
+
 # 알려진 랜섬웨어 확장자 (단순 데모용 — 실제로는 동적 학습 필요)
 SUSPICIOUS_EXTENSIONS = {
     ".encrypted", ".enc", ".locked", ".crypted", ".crypt",
     ".wcry", ".wncry", ".wannacry",
     ".ryk", ".ryuk",
     ".lockbit",
+}
+
+# 정상 프로그램이 끊임없이 쓰고 지우는 노이즈 경로/확장자.  이 경로의 변경은
+# 암호화 신호로 치지 않는다 (Edge BrowserMetrics, 패키지 앱 캐시, 임시파일 등).
+# 경로는 소문자 부분 일치.
+NOISE_PATH_FRAGMENTS = (
+    "\\appdata\\local\\packages\\",
+    "\\appdata\\local\\microsoft\\",
+    "\\appdata\\locallow\\",
+    "browsermetrics",
+    "\\inetcache\\", "\\webcache",
+    "\\temp\\", "\\tmp\\",
+    "\\cache\\", "\\code cache\\", "\\gpucache\\", "\\cache_data\\",
+    "\\indexeddb\\", "\\service worker\\",
+    "\\crashpad", "\\crashdumps\\",
+    "\\$recycle.bin\\", "\\system volume information\\",
+)
+NOISE_EXTENSIONS = {
+    ".tmp", ".temp", ".log", ".etl", ".ldb", ".lock",
+    ".crdownload", ".part", ".partial", ".pma", ".dmp",
 }
 
 
@@ -113,6 +154,9 @@ class MassIODetector(Detector):
         self._last_magic: Dict[str, str] = {}
         self._lock = threading.Lock()
         self._observer = None
+        # Canary 교차 신호: canary 디텍터가 트립하면 set 된다.
+        self._canary_tripped_at = 0.0
+        engine.subscribe(self._on_engine_signal)
 
     def run(self) -> None:
         if not HAS_WATCHDOG:
@@ -159,11 +203,41 @@ class MassIODetector(Detector):
 
     # ---- file event hooks ----
 
-    def on_modified(self, path: Path) -> None:
-        if not path.is_file():
-            return
+    @staticmethod
+    def _is_noise(path: Path) -> bool:
+        """정상 프로그램의 캐시/임시파일 변경인지 — 암호화 신호에서 제외."""
+        if path.suffix.lower() in NOISE_EXTENSIONS:
+            return True
+        p = str(path).lower()
+        return any(frag in p for frag in NOISE_PATH_FRAGMENTS)
+
+    def _count_encryption_event(self) -> None:
+        """burst 카운터에는 '암호화 특징' 이벤트만 누적한다."""
         with self._lock:
             self._modify_times.append(time.time())
+
+    # ---- canary 교차 신호 부스트 ----
+
+    def _on_engine_signal(self, sig, score, level) -> None:
+        """엔진 리스너: canary 트립이 들어오면 부스트 윈도우를 연다."""
+        if sig.detector == "canary":
+            self._canary_tripped_at = time.time()
+
+    def _boost_active(self) -> bool:
+        return (time.time() - self._canary_tripped_at) < CANARY_BOOST_WINDOW
+
+    def _entropy_bar(self) -> float:
+        return ENTROPY_THRESHOLD_BOOST if self._boost_active() else ENTROPY_THRESHOLD
+
+    def _w(self, weight: int) -> int:
+        """부스트 중이면 시그널 가중치를 키운다."""
+        if self._boost_active():
+            return int(round(weight * CANARY_BOOST_MULTIPLIER))
+        return weight
+
+    def on_modified(self, path: Path) -> None:
+        if not path.is_file() or self._is_noise(path):
+            return
 
         # 엔트로피 + 매직바이트 분석
         try:
@@ -182,9 +256,10 @@ class MassIODetector(Detector):
 
         # 시그널 1: 매직바이트 소실 (이전엔 알려진 형식, 지금은 알 수 없음)
         if prev_magic and prev_magic != "UNKNOWN" and magic is None:
+            self._count_encryption_event()
             self.emit(Signal(
                 detector=self.name, name="magic_bytes_lost",
-                weight=W_MAGIC_LOST,
+                weight=self._w(W_MAGIC_LOST),
                 severity=Severity.HIGH,
                 message=f"File magic bytes lost: {path.name} (was {prev_magic})",
                 metadata={"path": str(path), "previous_magic": prev_magic,
@@ -192,12 +267,16 @@ class MassIODetector(Detector):
             ))
 
         # 시그널 2: 고엔트로피 + 알려진 형식이 아님
-        if ent >= ENTROPY_THRESHOLD and magic is None:
+        if ent >= self._entropy_bar() and magic is None:
             ext = path.suffix.lower()
-            if ext in TARGET_EXTENSIONS:
+            # 원래부터 고엔트로피인 압축·미디어 형식은 제외(오탐 방지).  이들이
+            # 실제로 암호화되면 magic_bytes_lost / suspicious_extension / burst
+            # 같은 *변화* 신호로 잡힌다 — 정적 엔트로피만으로 판정하지 않는다.
+            if ext in TARGET_EXTENSIONS and ext not in NATIVE_HIGH_ENTROPY_EXTS:
+                self._count_encryption_event()
                 self.emit(Signal(
                     detector=self.name, name="high_entropy_write",
-                    weight=W_HIGH_ENTROPY_WRITE,
+                    weight=self._w(W_HIGH_ENTROPY_WRITE),
                     severity=Severity.MEDIUM,
                     message=f"High-entropy write to user file: {path.name} "
                             f"(H={ent:.2f})",
@@ -205,22 +284,22 @@ class MassIODetector(Detector):
                 ))
 
     def on_moved(self, src: Path, dest: Path) -> None:
-        ext = dest.suffix.lower()
-        if ext in SUSPICIOUS_EXTENSIONS:
+        # rename 자체는 노이즈가 많고, '의심 확장자로의 변경'만 암호화 특징이다.
+        if dest.suffix.lower() in SUSPICIOUS_EXTENSIONS:
+            self._count_encryption_event()
             self.emit(Signal(
                 detector=self.name, name="suspicious_extension",
-                weight=W_SUSPICIOUS_EXT * 3,  # 강한 시그널
+                weight=self._w(W_SUSPICIOUS_EXT * 3),  # 강한 시그널
                 severity=Severity.HIGH,
                 message=f"File renamed to suspicious extension: "
                         f"{src.name} -> {dest.name}",
                 metadata={"src": str(src), "dest": str(dest)},
             ))
-        with self._lock:
-            self._modify_times.append(time.time())
 
     def on_created(self, path: Path) -> None:
-        with self._lock:
-            self._modify_times.append(time.time())
+        # 파일 생성 자체는 암호화 특징이 아니므로 burst 로 치지 않는다.
+        # (엔트로피/매직 변화는 후속 on_modified 에서 평가된다.)
+        return
 
     # ---- burst detection ----
 
@@ -234,10 +313,10 @@ class MassIODetector(Detector):
         if count >= BURST_THRESHOLD:
             self.emit(Signal(
                 detector=self.name, name="modify_burst",
-                weight=W_BURST_MODIFY,
+                weight=self._w(W_BURST_MODIFY),
                 severity=Severity.HIGH,
-                message=f"File modification burst: {count} changes "
-                        f"in {BURST_WINDOW_SEC}s",
+                message=f"Encryption-pattern burst: {count} high-entropy/"
+                        f"magic-loss/suspicious-rename events in {BURST_WINDOW_SEC}s",
                 metadata={"count": count, "window_sec": BURST_WINDOW_SEC},
             ))
             # 한 번 알린 뒤 윈도우 비워서 폭주 방지
