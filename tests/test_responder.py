@@ -372,6 +372,64 @@ class TestActionsHistory:
 
 
 # ---------------------------------------------------------------------------
+# Kill clears the killed PID's signals from the live scoring window
+# (so the dashboard threat level returns to "safe" on its own — no manual reset)
+# ---------------------------------------------------------------------------
+
+class TestKillForgetsScoringSignals:
+    def _kill_responder(self, engine):
+        r = _make_responder(engine=engine, mode=ResponderMode.KILL)
+        r._lookup = lambda pid: ("badapp.exe", "badapp.exe --encrypt",
+                                 r"C:\Temp\badapp.exe")
+        # Force a successful terminate without touching a real process.
+        r._terminate = lambda pid: (True, None)
+        return r
+
+    def test_successful_kill_clears_that_pids_signals(self):
+        engine = _make_engine()
+        # A CRITICAL-weight signal attributed to the offending PID.
+        engine.submit(Signal(detector="canary", name="canary_modified",
+                             weight=200, severity=Severity.CRITICAL,
+                             message="trip", metadata={"pid": 4242}))
+        assert engine.current_level() == Severity.CRITICAL
+
+        action = self._kill_responder(engine)._respond_to_pid(4242, "test")
+        assert action.terminated is True
+        # The killed PID's signals are gone → level decays to safe immediately.
+        assert engine.current_level() == Severity.INFO
+        assert engine.current_score() == 0
+
+    def test_kill_leaves_other_pids_signals_intact(self):
+        engine = _make_engine()
+        engine.submit(Signal(detector="canary", name="canary_modified",
+                             weight=200, severity=Severity.CRITICAL,
+                             message="trip", metadata={"pid": 4242}))
+        # A second, still-active attacker.
+        engine.submit(Signal(detector="canary", name="canary_modified",
+                             weight=200, severity=Severity.CRITICAL,
+                             message="trip", metadata={"pid": 7777}))
+
+        self._kill_responder(engine)._respond_to_pid(4242, "test")
+        # Only the killed PID was forgotten; the live threat from 7777 stays.
+        assert engine.current_level() == Severity.CRITICAL
+
+    def test_failed_kill_does_not_clear_signals(self):
+        engine = _make_engine()
+        engine.submit(Signal(detector="canary", name="canary_modified",
+                             weight=200, severity=Severity.CRITICAL,
+                             message="trip", metadata={"pid": 4242}))
+        r = _make_responder(engine=engine, mode=ResponderMode.KILL)
+        r._lookup = lambda pid: ("badapp.exe", "badapp.exe --encrypt",
+                                 r"C:\Temp\badapp.exe")
+        r._terminate = lambda pid: (False, "terminate failed")
+
+        action = r._respond_to_pid(4242, "test")
+        assert action.terminated is False
+        # Kill failed → the threat is NOT over, so signals must remain.
+        assert engine.current_level() == Severity.CRITICAL
+
+
+# ---------------------------------------------------------------------------
 # ESCALATE_CHILD_NAMES set
 # ---------------------------------------------------------------------------
 

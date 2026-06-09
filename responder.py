@@ -362,6 +362,7 @@ class ProcessResponder:
                 with self._lock:
                     self._already_quarantined.add(pid)
 
+        killed_now = False
         if self.mode == ResponderMode.KILL and not already_killed:
             ok, err = self._terminate(pid)
             terminated = ok
@@ -370,6 +371,18 @@ class ProcessResponder:
             else:
                 with self._lock:
                     self._already_killed.add(pid)
+                killed_now = True
+
+        if killed_now:
+            # 이 PID 가 가하던 위협은 종료됐다.  라이브 점수 윈도우에서 그 PID 의
+            # 시그널을 즉시 제거해, 모든 활성 공격자가 사라지면 대시보드 위협
+            # 등급이 운영자의 수동 초기화 없이도 스스로 "안전" 으로 복귀하게 한다.
+            # 이 호출이 없으면 종료된 PID 의 시그널이 120초 윈도우가 만료될 때까지
+            # 점수를 CRITICAL 로 유지해 대시보드가 "위험" 에 고착된다.
+            try:
+                self.engine.forget_pid(pid)
+            except Exception as e:
+                print(f"[responder] forget_pid failed: {e}")
 
         action = KillAction(time.time(), pid, proc_name, cmdline, reason,
                             self.mode.value, quarantined=quarantined,

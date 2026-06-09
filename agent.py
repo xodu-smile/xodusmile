@@ -292,7 +292,7 @@ class Agent:
         # Reproduce the score's enc-PID correlation set (trusted actors excluded).
         enc_pids = set()
         for s in sigs:
-            if (s.metadata or {}).get("actor_trusted"):
+            if ScoringEngine._trusted(s):
                 continue
             if s.name in ENCRYPTION_SIGNAL_NAMES:
                 p = pid_of(s)
@@ -301,7 +301,7 @@ class Agent:
 
         buckets: dict = {}
         for s in sigs:
-            trusted = bool((s.metadata or {}).get("actor_trusted"))
+            trusted = ScoringEngine._trusted(s)
             contributes = s.weight
             if trusted:
                 contributes = 0
