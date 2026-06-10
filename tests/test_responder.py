@@ -480,3 +480,119 @@ class TestKillWithPsutil:
         action = r._respond_to_pid(999999, "test")
         # Should record an action (error or not) without raising
         assert action is not None
+
+
+# ---------------------------------------------------------------------------
+# Corroborated precise-kill policy (보고서 5-2)
+#
+# Regression guard: this policy was introduced in ab743d1 and accidentally
+# reverted in 1ee4263 (the score-wide sweep came back).  These tests pin the
+# intended behaviour so a refactor can't silently undo it again:
+#   - CRITICAL signal naming a PID  → act immediately
+#   - HIGH signal                   → act only with corroboration
+#       (encryption activity in the window, or a 2nd distinct detector
+#        naming the same PID); otherwise record "observed only"
+#   - no score-wide sweep: aggregate CRITICAL alone kills nobody
+# ---------------------------------------------------------------------------
+
+class TestCorroboratedKillPolicy:
+    def _armed_responder(self, engine, killed):
+        r = _make_responder(engine=engine, mode=ResponderMode.KILL)
+        r._lookup = lambda pid: ("badapp.exe", "badapp.exe --encrypt",
+                                 r"C:\Temp\badapp.exe")
+
+        def fake_terminate(pid):
+            killed.append(pid)
+            return (True, None)
+
+        r._terminate = fake_terminate
+        return r
+
+    def test_uncorroborated_high_is_observed_only(self):
+        engine = _make_engine()
+        killed = []
+        r = self._armed_responder(engine, killed)
+        sig = Signal(detector="process_watcher", name="process_masquerade",
+                     weight=60, severity=Severity.HIGH, message="m",
+                     metadata={"pid": 4242})
+        engine.submit(sig)
+        r._dispatch(sig, engine.current_score(), engine.current_level())
+
+        assert killed == []
+        last = r.actions(limit=1)[-1]
+        assert last["terminated"] is False
+        assert "observed only" in (last["error"] or "")
+
+    def test_critical_signal_acts_alone(self):
+        engine = _make_engine()
+        killed = []
+        r = self._armed_responder(engine, killed)
+        sig = Signal(detector="process_cmdline", name="vssadmin_delete_shadows",
+                     weight=70, severity=Severity.CRITICAL, message="m",
+                     metadata={"pid": 4242})
+        engine.submit(sig)
+        r._dispatch(sig, engine.current_score(), engine.current_level())
+        assert 4242 in killed
+
+    def test_high_with_encryption_activity_acts(self):
+        engine = _make_engine()
+        killed = []
+        r = self._armed_responder(engine, killed)
+        # Independent ground-truth encryption evidence in the window.
+        engine.submit(Signal(detector="mass_io", name="magic_bytes_lost",
+                             weight=12, severity=Severity.HIGH, message="m",
+                             metadata={"path": "a.docx"}))
+        sig = Signal(detector="process_watcher", name="process_masquerade",
+                     weight=60, severity=Severity.HIGH, message="m",
+                     metadata={"pid": 4242})
+        engine.submit(sig)
+        r._dispatch(sig, engine.current_score(), engine.current_level())
+        assert 4242 in killed
+
+    def test_high_with_second_detector_acts(self):
+        engine = _make_engine()
+        killed = []
+        r = self._armed_responder(engine, killed)
+        # Two distinct detectors independently name the same PID.
+        engine.submit(Signal(detector="process_watcher", name="child_fanout",
+                             weight=40, severity=Severity.HIGH, message="m",
+                             metadata={"pid": 4242}))
+        sig = Signal(detector="minifilter", name="kernel_rename_burst",
+                     weight=40, severity=Severity.HIGH, message="m",
+                     metadata={"pid": 4242})
+        engine.submit(sig)
+        r._dispatch(sig, engine.current_score(), engine.current_level())
+        assert 4242 in killed
+
+    def test_no_score_wide_sweep(self):
+        """Aggregate CRITICAL score must not kill PIDs that only emitted
+        low-severity signals (the old sweep did exactly that)."""
+        engine = _make_engine()
+        killed = []
+        r = self._armed_responder(engine, killed)
+        # Pump the aggregate score over the CRITICAL threshold with
+        # non-encryption sabotage signals from one PID...
+        for _ in range(3):
+            engine.submit(Signal(detector="registry_kernel",
+                                 name="defender_service_tamper",
+                                 weight=70, severity=Severity.CRITICAL,
+                                 message="m", metadata={"pid": 1111}))
+        # ...then a bystander PID emits a harmless LOW signal.
+        low = Signal(detector="minifilter", name="file_delete",
+                     weight=3, severity=Severity.LOW, message="m",
+                     metadata={"pid": 2222})
+        engine.submit(low)
+        r._dispatch(low, engine.current_score(), engine.current_level())
+        assert 2222 not in killed
+
+    def test_dispatch_without_pid_does_nothing(self):
+        engine = _make_engine()
+        killed = []
+        r = self._armed_responder(engine, killed)
+        sig = Signal(detector="canary", name="canary_modified",
+                     weight=80, severity=Severity.CRITICAL, message="m",
+                     metadata={})   # no pid → nothing to act on
+        engine.submit(sig)
+        r._dispatch(sig, engine.current_score(), engine.current_level())
+        assert killed == []
+        assert r.actions(limit=5) == []

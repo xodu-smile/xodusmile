@@ -173,7 +173,7 @@ weight, severity, message, metadata, score_after, level_after)` +
 | `class ResponderMode(str, Enum)` | `OFF, QUARANTINE, KILL`. |
 | `NEVER_KILL = {…}` | 절대 죽이지 않는 목록 — OS 핵심 + `python.exe`/`py.exe`/`pythonw.exe`. |
 | `@dataclass KillAction` | `timestamp, pid, process_name, cmdline, reason, mode, quarantined, terminated, error`. |
-| `ProcessResponder(engine, *, mode, minifilter, critical_threshold, on_action)` | `on_action` 으로 `IncidentReporter` 가 연결된다. |
+| `ProcessResponder(engine, *, mode, minifilter, on_action, allowlist)` | `on_action` 으로 `IncidentReporter` 가, `allowlist` 로 운영자 허용목록(never-kill 보강)이 연결된다. |
 | `attach()` | 엔진 구독. 멱등. |
 | `actions(limit=50)` | 대시보드용 이력. |
 | `manual_kill(pid, reason)` / `manual_release(pid)` | 대시보드 버튼이 도달하는 곳. |

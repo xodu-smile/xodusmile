@@ -78,7 +78,6 @@ W_SUSPICIOUS_EXT = 5           # 의심 확장자로 변경
 
 # 임계값
 ENTROPY_THRESHOLD = 7.5        # 8.0이 최대. 7.5+는 압축/암호화 의심
-ENTROPY_DELTA_THRESHOLD = 2.5  # 보고서 임계값
 BURST_WINDOW_SEC = 10
 BURST_THRESHOLD = 15           # 10초 안에 15개 이상 변경
 MAX_SAMPLE_BYTES = 4096        # 엔트로피 계산용 샘플링 크기

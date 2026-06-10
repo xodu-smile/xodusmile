@@ -15,10 +15,23 @@ Operating modes:
                                  process alive for forensic capture
   - ``ResponderMode.KILL``       step 1 + step 2 (default for production)
 
-The default trigger fires when a single signal of severity HIGH or
-CRITICAL carries a ``pid`` in its metadata.  We also fire when the
-rolling score crosses the CRITICAL threshold, in which case we kill every
-PID that has contributed to the score in the active window.
+Trigger policy (corroborated precise kill — 보고서 5-2 / WIKI §6):
+
+  The responder reacts ONLY to signals that name a PID — there is no
+  "score crossed CRITICAL, sweep every PID in the window" path.  The
+  sweep was removed on purpose: one false-positive heuristic plus an
+  unrelated benign burst could push the aggregate score over the line
+  and massacre every bystander PID at once, relying solely on the
+  never-kill list.
+
+  - CRITICAL signal (canary trip, VSS deletion, note spread …) is
+    high-confidence on its own → act immediately.
+  - HIGH signal is a heuristic → requires corroboration before we act:
+    real encryption/destruction activity in the window (via
+    ``ScoringEngine.has_encryption_activity``), or a second distinct
+    detector independently naming the same PID.  An uncorroborated
+    HIGH is recorded as "observed only" so the operator still sees it
+    on the dashboard, but nothing is killed.
 
 Termination strategy on Windows:
 
@@ -44,7 +57,7 @@ try:
 except ImportError:
     HAS_PSUTIL = False
 
-from scoring import ScoringEngine, Signal, Severity, THRESHOLD_CRITICAL
+from scoring import ScoringEngine, Signal, Severity
 
 
 class ResponderMode(str, Enum):
@@ -161,13 +174,11 @@ class ProcessResponder:
                  *,
                  mode: ResponderMode = ResponderMode.KILL,
                  minifilter=None,
-                 critical_threshold: int = THRESHOLD_CRITICAL,
                  on_action: Optional[Callable[[KillAction], None]] = None,
                  allowlist=None):
         self.engine = engine
         self.mode = mode
         self.minifilter = minifilter
-        self.critical_threshold = critical_threshold
         self._on_action = on_action
         # Operator allowlist (allowlist.Allowlist | None).  A PID whose verified
         # image is allowlisted is treated as never-kill — a trusted third-party
@@ -220,32 +231,67 @@ class ProcessResponder:
     # ---------------------------------------------------- signal callbacks
 
     def _dispatch(self, sig: Signal, score: int, level: Severity) -> None:
-        # 1. PID-scoped reaction: any HIGH/CRITICAL signal that names a PID.
+        # PID-scoped reaction ONLY — a signal must name the PID it accuses.
+        # (점수 기반 전체 sweep 은 의도적으로 없다: 오탐 1건 + 무관한 정상
+        # burst 가 합산 점수만 넘겨도 윈도우의 모든 PID 가 종료되는 참사를
+        # never-kill 목록 하나에 기대 막아야 했기 때문.  ab743d1 참조.)
         pid = self._extract_pid(sig)
-        if pid and sig.severity in (Severity.HIGH, Severity.CRITICAL):
-            # 탐지 시점에 신호가 들고 온 프로세스 이름/명령줄.  일회성 도구
-            # (vssadmin/wmic 등)는 차단 시점엔 이미 종료돼 psutil 조회가
-            # 실패하므로, 이 값들을 표시용 폴백으로 넘긴다.
-            meta = sig.metadata or {}
-            hint = meta.get("process") or ""
-            cmd_hint = meta.get("cmdline") or ""
-            self._respond_to_pid(pid, f"{sig.detector}/{sig.name}",
+        if not pid or sig.severity not in (Severity.HIGH, Severity.CRITICAL):
+            return
+
+        # 탐지 시점에 신호가 들고 온 프로세스 이름/명령줄.  일회성 도구
+        # (vssadmin/wmic 등)는 차단 시점엔 이미 종료돼 psutil 조회가
+        # 실패하므로, 이 값들을 표시용 폴백으로 넘긴다.
+        meta = sig.metadata or {}
+        hint = meta.get("process") or ""
+        cmd_hint = meta.get("cmdline") or ""
+        reason = f"{sig.detector}/{sig.name}"
+
+        if not self._is_confident(pid, sig):
+            # Suspicious but uncorroborated — record intent, take no action.
+            # The dashboard still shows it so an operator can judge.
+            self._record_observed(pid, reason,
                                   name_hint=hint, cmd_hint=cmd_hint)
+            return
 
-            # 1b. Parent escalation: ransomware drives destruction through
-            #     LOLBins/tools (vssadmin, powershell, cmd, wbadmin, ...) that
-            #     are either transient or on the never-kill list.  Killing the
-            #     tool is too late or refused, so also terminate the PARENT that
-            #     issued the command — that is the actual malware body.
-            ppid = self._extract_parent_pid(sig)
-            if ppid and ppid != pid and self._is_lolbin_signal(sig):
-                self._respond_to_pid(
-                    ppid, f"{sig.detector}/{sig.name} (parent of pid={pid})")
+        self._respond_to_pid(pid, reason, name_hint=hint, cmd_hint=cmd_hint)
 
-        # 2. Score-wide reaction: if the rolling score went CRITICAL, sweep
-        #    every PID that has contributed in the current window.
-        if score >= self.critical_threshold:
-            self._sweep_window()
+        # Parent escalation: ransomware drives destruction through
+        # LOLBins/tools (vssadmin, powershell, cmd, wbadmin, ...) that
+        # are either transient or on the never-kill list.  Killing the
+        # tool is too late or refused, so also terminate the PARENT that
+        # issued the command — that is the actual malware body.
+        ppid = self._extract_parent_pid(sig)
+        if ppid and ppid != pid and self._is_lolbin_signal(sig):
+            self._respond_to_pid(
+                ppid, f"{reason} (parent of pid={pid})")
+
+    def _is_confident(self, pid: int, sig: Signal) -> bool:
+        """Decide whether the evidence justifies acting on ``pid``.
+
+        CRITICAL signals (canary trip, VSS deletion, note spread …) act on
+        their own — they are either ground-truth encryption evidence or
+        pre-encryption sabotage no benign process performs.  A HIGH signal
+        is a heuristic and needs corroboration: real encryption activity
+        in the window (excluding the triggering signal itself), or a
+        second distinct detector independently naming the same PID.
+        """
+        if sig.severity == Severity.CRITICAL:
+            return True
+
+        # Real file-encryption/destruction observed elsewhere (excluding the
+        # triggering signal itself) corroborates a HIGH heuristic.
+        if self.engine.has_encryption_activity(exclude=sig):
+            return True
+
+        # Or: two or more distinct detectors independently flagged this PID.
+        detectors: Set[str] = set()
+        for other in self.engine.recent_signals(limit=200):
+            if self._extract_pid(other) == pid:
+                detectors.add(other.detector)
+            if len(detectors) >= 2:
+                return True
+        return False
 
     def _extract_pid(self, sig: Signal) -> Optional[int]:
         meta = sig.metadata or {}
@@ -270,26 +316,6 @@ class ProcessResponder:
         meta = sig.metadata or {}
         name = (meta.get("process") or "").lower()
         return name in ESCALATE_CHILD_NAMES
-
-    # Severities that make a PID a sweep target.  We deliberately exclude
-    # INFO/LOW: a benign process that merely deleted a temp/cache file
-    # (e.g. file_delete, weight 3, LOW) shows up in the window but must NOT
-    # be terminated just because the *aggregate* score is CRITICAL.  Only
-    # PIDs that themselves emitted a genuinely suspicious signal
-    # (persistence, shadow-copy/BCD tampering, mass rename, canary, …) are
-    # swept.  Without this filter the sweep massacres bystander processes.
-    _SWEEP_SEVERITIES = (Severity.MEDIUM, Severity.HIGH, Severity.CRITICAL)
-
-    def _sweep_window(self) -> None:
-        pids: Set[int] = set()
-        for sig in self.engine.recent_signals(limit=200):
-            if sig.severity not in self._SWEEP_SEVERITIES:
-                continue
-            pid = self._extract_pid(sig)
-            if pid:
-                pids.add(pid)
-        for pid in pids:
-            self._respond_to_pid(pid, "score_critical_sweep")
 
     # ---------------------------------------------------- core kill logic
 
@@ -328,9 +354,9 @@ class ProcessResponder:
 
         # Dedupe: if we've already done everything this mode calls for on
         # this PID, return silently WITHOUT recording another action or
-        # writing a duplicate incident report.  The critical-score sweep
-        # re-visits the same PIDs on every signal tick; without this guard
-        # a single ransomware run produces thousands of repeat reports.
+        # writing a duplicate incident report.  An active ransomware PID
+        # re-fires HIGH/CRITICAL signals on every burst tick; without this
+        # guard a single run produces thousands of repeat reports.
         fully_handled = (
             (self.mode == ResponderMode.KILL and already_killed) or
             (self.mode == ResponderMode.QUARANTINE and already_quar)
@@ -393,6 +419,17 @@ class ProcessResponder:
         action = KillAction(time.time(), pid, "", "", reason,
                             self.mode.value, quarantined=False,
                             terminated=False, error=why)
+        return self._record(action)
+
+    def _record_observed(self, pid: int, reason: str,
+                         name_hint: str = "", cmd_hint: str = "") -> KillAction:
+        """A suspicious-but-uncorroborated HIGH signal: record, don't act."""
+        proc_name, cmdline, _exe = self._lookup(pid)
+        action = KillAction(time.time(), pid, proc_name or name_hint,
+                            cmdline or cmd_hint, reason,
+                            self.mode.value, quarantined=False,
+                            terminated=False,
+                            error="observed only (no corroboration)")
         return self._record(action)
 
     def _record(self, action: KillAction) -> KillAction:

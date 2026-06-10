@@ -205,7 +205,9 @@ SIGNAL_WHY = {
 }
 
 # 종합 점수가 최고 수준(CRITICAL)에 도달했을 때, 같은 시간대에 활동한 PID 를
-# 함께 차단하는 sweep 의 reason 코드.  responder._sweep_window 가 사용한다.
+# 함께 차단하던 구버전 sweep 의 reason 코드.  현재 responder 는 PID 명시 +
+# corroboration 방식이라 이 사유를 새로 만들지 않지만, 과거 DB/액션 로그를
+# 읽을 때를 위해 해석은 유지한다.
 _SWEEP_REASON = "score_critical_sweep"
 
 
