@@ -33,7 +33,8 @@ from dataclasses import dataclass, asdict, field
 from pathlib import Path
 from typing import Deque, Dict, List, Optional
 
-from scoring import ScoringEngine, Signal, ENCRYPTION_SIGNAL_NAMES
+from scoring import (ScoringEngine, Signal, Severity,
+                     ENCRYPTION_SIGNAL_NAMES, THRESHOLD_CRITICAL)
 import attack_map
 
 # Native desktop notifications are *best effort* and purely advisory: the
@@ -194,6 +195,10 @@ SIGNAL_WHY = {
 # 종합 점수가 최고 수준(CRITICAL)에 도달했을 때, 같은 시간대에 활동한 PID 를
 # 함께 차단하는 sweep 의 reason 코드.  responder._sweep_window 가 사용한다.
 _SWEEP_REASON = "score_critical_sweep"
+
+# JSON 사이드카의 경로 배열 상한 — 공격자가 건드린 파일 수에 비례해 산출물이
+# 무한히 커지는 것을 막는다.  전체 규모는 *_total 카운트로 따로 보존한다.
+_SIDECAR_MAX_PATHS = 500
 
 
 def _ko_detector(name: str) -> str:
@@ -590,18 +595,40 @@ def summarize_damage(signals: List["Signal"]) -> dict:
     }
 
 
+def _damage_floors(d: dict) -> tuple:
+    """(변조/암호화 최소 건수, 이름변경 최소 건수).
+
+    커널 burst 신호는 metadata 에 건수(count)만 담고 파일 경로는 마지막 1건만
+    담는다.  경로 집합 크기만 세면 "12건 burst 로 차단했는데 이름변경 1개"
+    같은 자기모순 보고서가 된다 — burst 카운터를 최소 건수 바닥으로 쓴다.
+    """
+    enc_min = max(len(d["encrypted"]), d["max_modify_burst"])
+    ren_min = max(len(d["renamed"]), d["max_rename_burst"])
+    return enc_min, ren_min
+
+
 def _damage_headline(d: dict) -> str:
     """한 줄 요약 (한눈에 보기 / campaign 헤더용)."""
-    return (f"변조/암호화 {len(d['encrypted'])}개 · 이름변경 {len(d['renamed'])}개 "
-            f"· 삭제 {len(d['deleted'])}개 (고유 합계 {d['distinct_total']}개)")
+    enc_min, ren_min = _damage_floors(d)
+    enc_txt = (f"최소 {enc_min}개" if enc_min > len(d["encrypted"])
+               else f"{len(d['encrypted'])}개")
+    ren_txt = (f"최소 {ren_min}개" if ren_min > len(d["renamed"])
+               else f"{len(d['renamed'])}개")
+    return (f"변조/암호화 {enc_txt} · 이름변경 {ren_txt} "
+            f"· 삭제 {len(d['deleted'])}개 (경로 확인 {d['distinct_total']}개)")
 
 
 def _damage_lines(d: dict) -> List[str]:
     lines: List[str] = []
-    lines.append(f"- **변조/암호화 정황 파일:** {len(d['encrypted'])}개")
-    lines.append(f"- **이름이 바뀐 파일:** {len(d['renamed'])}개")
+    enc_min, ren_min = _damage_floors(d)
+    enc_extra = (f" (커널 관측 기준 최소 {enc_min}개)"
+                 if enc_min > len(d["encrypted"]) else "")
+    ren_extra = (f" (커널 관측 기준 최소 {ren_min}개)"
+                 if ren_min > len(d["renamed"]) else "")
+    lines.append(f"- **변조/암호화 정황 파일:** 경로 확인 {len(d['encrypted'])}개{enc_extra}")
+    lines.append(f"- **이름이 바뀐 파일:** 경로 확인 {len(d['renamed'])}개{ren_extra}")
     lines.append(f"- **삭제된 파일:** {len(d['deleted'])}개")
-    lines.append(f"- **영향받은 고유 파일(합계):** {d['distinct_total']}개")
+    lines.append(f"- **영향받은 고유 파일(경로 확인 합계):** {d['distinct_total']}개")
     intensity: List[str] = []
     if d["max_modify_burst"]:
         intensity.append(f"한 번에 최대 {d['max_modify_burst']}개 동시 변경")
@@ -837,6 +864,12 @@ class IncidentReporter:
 
         content = self._build_markdown(action)
         path = self._write_file(content, action)
+        # 기계가독 사이드카(.json) — SIEM/SOAR 인제스트용.  실패해도 md 보고서
+        # 와 대응 흐름은 막지 않는다.
+        try:
+            self._write_json_sidecar(action, path)
+        except Exception as e:
+            print(f"[reporter] json sidecar write failed: {e}")
 
         record = IncidentRecord(
             timestamp=action.timestamp,
@@ -923,16 +956,75 @@ class IncidentReporter:
 
     # ------------------------------------------------------- markdown body
 
+    @staticmethod
+    def _trigger_as_signal(action) -> Optional[Signal]:
+        """KillAction.trigger_signal(dict) -> Signal (없거나 깨졌으면 None).
+
+        responder 가 차단 시점에 캡처한 트리거 신호.  보고서 생성 시점에는
+        점수 윈도우(120초)에서 이미 퇴거되었을 수 있으므로, 엔진 재조회가
+        아니라 이 캡처가 "왜 차단했나"의 권위 있는 근거다.
+        """
+        d = getattr(action, "trigger_signal", None)
+        if not isinstance(d, dict) or not d.get("name"):
+            return None
+        try:
+            return Signal(
+                detector=d.get("detector", ""),
+                name=d["name"],
+                weight=int(d.get("weight", 0) or 0),
+                severity=Severity(d.get("severity", "INFO")),
+                message=d.get("message", ""),
+                metadata=d.get("metadata") or {},
+                timestamp=float(d.get("timestamp") or action.timestamp),
+            )
+        except (ValueError, TypeError):
+            return None
+
+    def _incident_context(self, action) -> dict:
+        """보고서/사이드카 공용: 행동 시점 캡처 우선의 사건 컨텍스트.
+
+        엔진 라이브 조회는 보조 자료다 — 신호가 윈도우에서 퇴거된 뒤에도
+        보고서가 차단 근거(트리거 신호·차단 시점 점수)와 모순되지 않게,
+        KillAction 에 캡처된 값을 1차로 쓴다.
+        """
+        recent = self.engine.recent_signals(limit=200)
+        pid_signals = [s for s in recent if self._signal_pid(s) == action.pid]
+        trig = self._trigger_as_signal(action)
+        if trig is not None and not any(
+                s.name == trig.name and abs(s.timestamp - trig.timestamp) < 1e-3
+                for s in pid_signals):
+            pid_signals.append(trig)
+            pid_signals.sort(key=lambda s: s.timestamp)
+
+        score_at = getattr(action, "score_at_action", None)
+        level_at = getattr(action, "level_at_action", "") or ""
+        if score_at is not None:
+            score, level, score_when = score_at, (level_at or "INFO"), "차단 시점"
+        else:
+            score = self.engine.current_score()
+            level = self.engine.current_level().value
+            score_when = "보고서 생성 시점"
+        return {
+            "recent": recent,
+            "pid_signals": pid_signals,
+            "trigger": trig,
+            "damage": summarize_damage(pid_signals),
+            "score": score,
+            "level": level,
+            "score_when": score_when,
+        }
+
     def _build_markdown(self, action) -> str:
         ts_local = time.strftime(
             "%Y-%m-%d %H:%M:%S %Z", time.localtime(action.timestamp)
         )
-        score = self.engine.current_score()
-        level = self.engine.current_level().value
-        recent = self.engine.recent_signals(limit=200)
-
-        pid_signals = [s for s in recent if self._signal_pid(s) == action.pid]
-        damage = summarize_damage(pid_signals)
+        ctx = self._incident_context(action)
+        score = ctx["score"]
+        level = ctx["level"]
+        recent = ctx["recent"]
+        pid_signals = ctx["pid_signals"]
+        trigger = ctx["trigger"]
+        damage = ctx["damage"]
 
         name_unknown = _is_unknown_name(action.process_name)
         # 이름을 못 가져온 경우엔 'unknown' 표기를 그대로 유지하고(설명만 덧붙임),
@@ -1007,8 +1099,24 @@ class IncidentReporter:
 
         lines.append("## 위협 수준")
         lines.append("")
-        lines.append(f"- **현재 위험 점수(최근 120초 누적):** {score} (150 이상이면 자동 차단)")
-        lines.append(f"- **판정된 위협 수준:** **{_ko_severity(level)}** ({level})")
+        lines.append(f"- **{ctx['score_when']} 위험 점수(최근 120초 누적):** {score}")
+        lines.append(f"- **{ctx['score_when']} 위협 수준:** "
+                     f"**{_ko_severity(level)}** ({level})")
+        # 차단 근거를 명시한다.  "점수 150 이상이면 차단" 한 가지만 적으면,
+        # 단일 고위험 신호로 즉시 차단된 사건(점수가 낮을 수 있음)에서
+        # "점수는 낮은데 왜 차단했지?" 라는 자기모순으로 읽힌다.
+        if _signame_from_reason(action.reason) == _SWEEP_REASON:
+            basis = (f"누적 위험 점수가 자동 차단 기준({THRESHOLD_CRITICAL}점)을 "
+                     "넘어, 같은 시간대에 활동한 프로세스를 일괄 차단했습니다.")
+        elif trigger is not None:
+            basis = (f"심각도 '{_ko_severity(trigger.severity.value)}"
+                     f"({trigger.severity.value})' 단일 신호에 의한 **즉시 차단**"
+                     f"입니다 — 누적 점수(자동 차단 기준 {THRESHOLD_CRITICAL}점)"
+                     "와 별개로, 고위험 신호 하나만으로도 곧바로 차단합니다.")
+        else:
+            basis = (f"고위험 신호에 의한 즉시 차단 또는 누적 점수 기준"
+                     f"({THRESHOLD_CRITICAL}점) 초과입니다.")
+        lines.append(f"- **차단 근거:** {basis}")
         lines.append("")
 
         # 표준 위협 분류(MITRE ATT&CK) — SOC/IR 가 외부 룰·인텔과 매핑하도록.
@@ -1029,16 +1137,27 @@ class IncidentReporter:
                      f"({platform.system()} {platform.release()})")
         lines.append("")
 
+        lines.extend(self._forensics_lines(action))
+
+        lines.extend(self._ioc_lines(action, damage))
+
         if pid_signals:
             lines.append(f"### 이 프로세스(PID {action.pid})에 대한 탐지 신호")
             lines.append("")
-            lines.extend(self._signal_table(pid_signals[-30:]))
+            lines.extend(self._signal_table(pid_signals[-30:],
+                                            mark_pid=action.pid))
             lines.append("")
 
-        if recent:
-            lines.append("### 최근 탐지 신호")
+        # 인시던트 PID 의 신호는 위에서 이미 보였으므로, 여기는 "그 외" 만.
+        other = [s for s in recent if self._signal_pid(s) != action.pid]
+        if other:
+            lines.append("### 같은 시간대 다른 프로세스의 신호 (참고용)")
             lines.append("")
-            lines.extend(self._signal_table(recent[-20:]))
+            lines.append("> 아래 신호는 **이 사건과 무관할 수 있습니다** (OS "
+                         "하우스키핑 등). 동시 진행 공격 여부를 가릴 때만 "
+                         "참고하세요.")
+            lines.append("")
+            lines.extend(self._signal_table(other[-20:]))
             lines.append("")
 
         lines.append("### 처리 기록 원본 (JSON)")
@@ -1052,18 +1171,98 @@ class IncidentReporter:
         return "\n".join(lines)
 
     @staticmethod
-    def _signal_table(signals: List[Signal]) -> List[str]:
+    def _forensics_lines(action) -> List[str]:
+        """포렌식 핵심 필드 — 차단 시점에 responder 가 캡처한 값.
+
+        해시는 위협 인텔(VirusTotal 등) 조회 키, 부모 프로세스는 감염 경로
+        추적의 출발점이다.  캡처 실패 항목은 "확인 불가"로 명시해 '없음'과
+        '못 얻음'을 구분한다.
+        """
+        exe = getattr(action, "exe_path", "") or ""
+        sha = getattr(action, "exe_sha256", "") or ""
+        user = getattr(action, "username", "") or ""
+        ppid = getattr(action, "ppid", None)
+        pname = getattr(action, "parent_name", "") or ""
+        detect_ts = getattr(action, "detect_ts", None)
+
+        out: List[str] = []
+        out.append("### 포렌식 정보")
+        out.append("")
+        out.append(f"- **실행 이미지 경로:** {f'`{exe}`' if exe else '확인 불가'}")
+        out.append(f"- **이미지 SHA-256:** {f'`{sha}`' if sha else '확인 불가'}"
+                   + (" — 위협 인텔/VirusTotal 조회에 사용하세요." if sha else ""))
+        out.append(f"- **실행 계정:** {f'`{user}`' if user else '확인 불가'}")
+        if ppid:
+            ptxt = f"`{pname}` (PID {ppid})" if pname else f"PID {ppid}"
+            out.append(f"- **부모 프로세스:** {ptxt} — 감염 경로 추적의 "
+                       "출발점입니다.")
+        else:
+            out.append("- **부모 프로세스:** 확인 불가")
+        if detect_ts:
+            latency = max(0.0, float(action.timestamp) - float(detect_ts))
+            out.append(f"- **탐지→대응 지연:** {latency:.3f}초")
+        out.append("")
+        return out
+
+    @staticmethod
+    def _ioc_lines(action, damage: dict) -> List[str]:
+        """침해 지표(IOC) 블록 — 복사/자동 인제스트 친화적 평문 키=값."""
+        sha = getattr(action, "exe_sha256", "") or ""
+        exe = getattr(action, "exe_path", "") or ""
+        sig = _signame_from_reason(action.reason)
+        techniques = sorted({t.tid for t in attack_map.techniques_for(sig)})
+        exts = sorted({Path(p).suffix.lower()
+                       for p in damage.get("renamed", set())
+                       if Path(p).suffix})
+        paths = sorted(damage.get("encrypted", set())
+                       | damage.get("renamed", set())
+                       | damage.get("deleted", set()))
+
+        out: List[str] = []
+        out.append("### 침해 지표 (IOC)")
+        out.append("")
+        out.append("```")
+        if sha:
+            out.append(f"sha256: {sha}")
+        if exe:
+            out.append(f"image_path: {exe}")
+        if action.cmdline:
+            out.append(f"cmdline: {action.cmdline}")
+        out.append(f"reason_code: {action.reason}")
+        if techniques:
+            out.append(f"mitre_attack: {', '.join(techniques)}")
+        for e in exts:
+            out.append(f"suspicious_extension: {e}")
+        for p in paths[:20]:
+            out.append(f"touched_path: {p}")
+        if len(paths) > 20:
+            out.append(f"# … touched_path {len(paths) - 20}건 생략 "
+                       "(JSON 사이드카의 damage.touched_paths / "
+                       "encrypted_paths·renamed_paths·deleted_paths 참고)")
+        out.append("```")
+        out.append("")
+        return out
+
+    @staticmethod
+    def _signal_table(signals: List[Signal],
+                      mark_pid: Optional[int] = None) -> List[str]:
         out = [
-            "| 시각 | 탐지기 | 신호 | 심각도 | 가중치 | 메시지 |",
-            "|------|--------|------|--------|--------|--------|",
+            "| 시각 | PID | 탐지기 | 신호 | 심각도 | 가중치 | 메시지 |",
+            "|------|-----|--------|------|--------|--------|--------|",
         ]
         for s in signals:
-            t = time.strftime("%H:%M:%S", time.localtime(s.timestamp))
+            # 날짜까지 표기 — 자정·일자 경계를 걸치는 사건의 타임라인
+            # 재구성에서 HH:MM:SS 만으로는 모호하다.
+            t = time.strftime("%m-%d %H:%M:%S", time.localtime(s.timestamp))
+            pid = IncidentReporter._signal_pid(s)
+            pid_txt = str(pid) if pid else "-"
+            if mark_pid is not None and pid == mark_pid:
+                pid_txt = f"**{pid}** ◀"
             msg = (s.message or "").replace("|", "\\|").replace("\n", " ")
             if len(msg) > 140:
                 msg = msg[:137] + "..."
             out.append(
-                f"| {t} | {_ko_detector(s.detector)} | {s.name} "
+                f"| {t} | {pid_txt} | {_ko_detector(s.detector)} | {s.name} "
                 f"| {_ko_severity(s.severity.value)} | {s.weight} | {msg} |"
             )
         return out
@@ -1086,6 +1285,60 @@ class IncidentReporter:
         fname = f"incident_{ts}_pid{action.pid}_{safe_name}.md"
         path = self.reports_dir / fname
         path.write_text(content, encoding="utf-8")
+        return path
+
+    def _write_json_sidecar(self, action, md_path: Path) -> Path:
+        """md 보고서와 같은 베이스명의 ``.json`` — SIEM/플레이북 자동화용.
+
+        md 는 사람(운영자/IR)용, json 은 기계용이다.  같은 컨텍스트 헬퍼를
+        쓰므로 두 산출물이 서로 다른 이야기를 할 수 없다.
+        """
+        ctx = self._incident_context(action)
+        damage = ctx["damage"]
+        sig = _signame_from_reason(action.reason)
+        names = {sig} | {s.name for s in ctx["pid_signals"]}
+        techniques: Dict[str, dict] = {}
+        for nm in names:
+            for t in attack_map.techniques_for(nm):
+                techniques.setdefault(t.tid, t.to_dict())
+        doc = {
+            "schema": "ransomguard.incident.v1",
+            "report_file": md_path.name,
+            "generated_at": time.time(),
+            "host": {
+                "name": platform.node(),
+                "os": f"{platform.system()} {platform.release()}",
+            },
+            "action": action.to_dict(),
+            "score_at_action": ctx["score"],
+            "level_at_action": ctx["level"],
+            "damage": {
+                # 경로 배열은 상한을 둔다 — 공격자가 수만 파일을 건드려
+                # 사이드카를 비대하게 만드는 자원 소진을 막는다.  전체 규모는
+                # *_total 카운트로 보존(잘림 여부를 소비자가 판별 가능).
+                "encrypted_paths": sorted(damage["encrypted"])[:_SIDECAR_MAX_PATHS],
+                "encrypted_total": len(damage["encrypted"]),
+                "renamed_paths": sorted(damage["renamed"])[:_SIDECAR_MAX_PATHS],
+                "renamed_total": len(damage["renamed"]),
+                "deleted_paths": sorted(damage["deleted"])[:_SIDECAR_MAX_PATHS],
+                "deleted_total": len(damage["deleted"]),
+                "touched_paths": sorted(damage["encrypted"]
+                                        | damage["renamed"]
+                                        | damage["deleted"])[:_SIDECAR_MAX_PATHS],
+                "distinct_paths": damage["distinct_total"],
+                "max_modify_burst": damage["max_modify_burst"],
+                "max_rename_burst": damage["max_rename_burst"],
+                "max_write_bytes": damage["max_write_bytes"],
+                "canary": damage["canary"],
+            },
+            "attack": sorted(techniques.values(), key=lambda d: d["id"]),
+            "pid_signals": [s.to_dict() for s in ctx["pid_signals"][-50:]],
+            "pid_signals_total": len(ctx["pid_signals"]),
+        }
+        path = md_path.with_suffix(".json")
+        path.write_text(json.dumps(doc, indent=2, ensure_ascii=False,
+                                   default=str),
+                        encoding="utf-8")
         return path
 
     # ------------------------------------------------------- campaign rollup

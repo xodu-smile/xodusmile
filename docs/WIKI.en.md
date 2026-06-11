@@ -175,7 +175,7 @@ who to quarantine/kill, executes it, and records `KillAction` rows.
 |---------|-------|
 | `class ResponderMode(str, Enum)` | `OFF, QUARANTINE, KILL`. |
 | `NEVER_KILL = {…}` | Hard refusal list — OS processes plus `python.exe`/`py.exe`/`pythonw.exe`. |
-| `@dataclass KillAction` | `timestamp, pid, process_name, cmdline, reason, mode, quarantined, terminated, error`. |
+| `@dataclass KillAction` | `timestamp, pid, process_name, cmdline, reason, mode, quarantined, terminated, error` plus **action-time forensic capture** `exe_path, exe_sha256, username, ppid, parent_name, score_at_action, level_at_action, trigger_signal, detect_ts` (all defaulted; reports use this capture as primary evidence instead of re-querying the live engine). |
 | `ProcessResponder(engine, *, mode, minifilter, critical_threshold, on_action)` | Constructor.  `on_action` fires for every recorded action and is how `IncidentReporter` is wired in. |
 | `attach()` | Subscribe to the engine. Idempotent. |
 | `actions(limit=50)` | History for the dashboard. |

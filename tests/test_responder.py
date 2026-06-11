@@ -422,3 +422,58 @@ class TestKillWithPsutil:
         action = r._respond_to_pid(999999, "test")
         # Should record an action (error or not) without raising
         assert action is not None
+
+
+# ---------------------------------------------------------------------------
+# Action-time forensic context capture (보고서 자기모순 방지 — RustyStealer PDF)
+# ---------------------------------------------------------------------------
+
+class FakeMinifilter:
+    def quarantine_pid(self, pid):
+        return True
+
+
+class TestActionTimeContext:
+    def test_killaction_new_fields_have_defaults(self):
+        from responder import KillAction
+        a = KillAction(1.0, 2, "x.exe", "x.exe", "r", "kill",
+                       quarantined=False, terminated=True)
+        d = a.to_dict()
+        assert d["exe_sha256"] == ""
+        assert d["score_at_action"] is None
+        assert d["trigger_signal"] is None
+
+    def test_hash_exe_handles_missing_path(self):
+        from responder import _hash_exe
+        assert _hash_exe("") == ""
+        assert _hash_exe("/nonexistent/zzz") == ""
+
+    def test_dispatch_captures_trigger_score_level(self):
+        engine = _make_engine()
+        actions = []
+        resp = ProcessResponder(engine, mode=ResponderMode.QUARANTINE,
+                                minifilter=FakeMinifilter(),
+                                on_action=actions.append)
+        resp.attach()
+        sig = _make_signal("kernel_rename_burst", metadata={"pid": 99999})
+        engine.submit(sig)
+        assert actions, "quarantine action should have been reported"
+        a = actions[0]
+        assert a.trigger_signal is not None
+        assert a.trigger_signal["name"] == "kernel_rename_burst"
+        assert a.detect_ts == sig.timestamp
+        assert a.score_at_action == 10
+        assert a.level_at_action == "INFO"
+
+    def test_forget_pid_after_terminated_kill(self):
+        """44ca918 의 자동 회복(1ee4263 에서 회귀)이 다시 동작해야 한다."""
+        engine = _make_engine()
+        resp = ProcessResponder(engine, mode=ResponderMode.KILL,
+                                minifilter=FakeMinifilter())
+        resp.attach()
+        # 존재하지 않는 pid → psutil.NoSuchProcess → terminated=True 처리
+        engine.submit(_make_signal("kernel_rename_burst",
+                                   metadata={"pid": 99999}))
+        remaining = [s for s in engine.recent_signals(limit=50)
+                     if (s.metadata or {}).get("pid") == 99999]
+        assert remaining == [], "killed pid's signals must leave the window"

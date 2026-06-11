@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "entries": {
+    "445ed27a3872b681d98190bae61ccb84954e1bc4e140df5370be958dee776b3a": {
+      "last_emitted_at_ms": 1781164239964,
+      "message": "Verify changes work after editing. Test functionality before marking complete."
+    },
+    "79a93d4a2f8f50b95f852280616242fee1855dc99a3c75211917f55e72e95fae": {
+      "last_emitted_at_ms": 1781164189481,
+      "message": "Use parallel execution for independent tasks. Use run_in_background for long operations (npm install, builds, tests)."
+    },
+    "1bb6914bc42b891c26d46c8ae2fd4f44071f59862e89dc550f4c82877b700216": {
+      "last_emitted_at_ms": 1781163994876,
+      "message": "The boulder never stops. Continue until all tasks complete."
+    },
+    "9c5599b0fd2e35a67e63503d720c0c4222c075b6f79851bbfdb80641c8702d3d": {
+      "last_emitted_at_ms": 1781163942767,
+      "message": "Spawning agent: oh-my-claudecode:code-reviewer (inherit) | Task: Code review of report changes"
+    },
+    "466399dafa2d20f60587180bad0a07358eb7f2bce724df0ff682f038ad33f5ad": {
+      "last_emitted_at_ms": 1781163938995,
+      "message": "Read multiple files in parallel when possible for faster analysis."
+    },
+    "b484b5e6cd49264e28e43847c7d5fd1bd2672f9edb6aec60565224b1db8b2639": {
+      "last_emitted_at_ms": 1781163931320,
+      "message": "Spawning agent: oh-my-claudecode:security-reviewer (inherit) | Task: Security review of report changes"
+    }
+  },
+  "updated_at": "2026-06-11T07:50:39.964Z"
+}

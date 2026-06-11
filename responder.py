@@ -30,6 +30,7 @@ Termination strategy on Windows:
 
 from __future__ import annotations
 
+import hashlib
 import os
 import platform
 import threading
@@ -142,9 +143,57 @@ class KillAction:
     quarantined: bool
     terminated: bool
     error: Optional[str] = None
+    # ---- 행동 시점 포렌식 컨텍스트 (보고서 5.x) -------------------------
+    # 보고서는 이 캡처를 1차 근거로 쓴다.  생성 시점에 라이브 엔진을 재조회
+    # 하면 120초 윈도우 퇴거 때문에 "차단은 했는데 근거 신호·점수가 0" 인
+    # 자기모순 보고서가 나올 수 있다(실제 사례: RustyStealer 인시던트 PDF).
+    # 모든 필드는 기본값을 가져 기존 생성자 호출과 호환된다.
+    exe_path: str = ""              # 실행 이미지 경로 (psutil, best-effort)
+    exe_sha256: str = ""            # 이미지 SHA-256 (위협 인텔/VT 조회용)
+    username: str = ""              # 프로세스 소유 계정
+    ppid: Optional[int] = None      # 부모 PID (감염 경로 추적)
+    parent_name: str = ""           # 부모 프로세스 이름
+    score_at_action: Optional[int] = None   # 차단 시점 누적 점수
+    level_at_action: str = ""               # 차단 시점 위협 수준
+    trigger_signal: Optional[dict] = None   # 차단을 유발한 신호(Signal.to_dict)
+    detect_ts: Optional[float] = None       # 트리거 신호 발생 시각
 
     def to_dict(self) -> dict:
         return asdict(self)
+
+
+# 이미지 해시 상한: 이보다 큰 파일은 해시하지 않는다 (대응 경로 지연 방지).
+_HASH_MAX_BYTES = 64 * 1024 * 1024
+
+
+def _hash_exe(path: str) -> str:
+    """실행 이미지의 SHA-256 (best-effort).
+
+    실패(경로 없음/접근 거부/크기 초과)는 빈 문자열 — 대응을 막지 않는다.
+    차단 직전·직후의 이미지 파일은 보통 디스크에 남아 있으므로 여기서 한 번
+    계산해 두면 IR 가 VirusTotal/위협 인텔에 바로 조회할 수 있다.
+    """
+    if not path:
+        return ""
+    # UNC/네트워크 경로는 열기만 해도 수십 초를 매달릴 수 있다(SMB 타임아웃).
+    # 이 함수는 탐지 펌프 스레드에서 돌므로, 로컬 디스크 이미지가 아니면
+    # 해시를 포기한다 — 보고서에는 '확인 불가'로 남는다.
+    if path.startswith(("\\\\", "//")):
+        return ""
+    try:
+        # 크기 상한은 읽으면서 검사한다 — getsize 선검사는 TOCTOU 틈과
+        # 불필요한 syscall 만 더한다.
+        h = hashlib.sha256()
+        read = 0
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                read += len(chunk)
+                if read > _HASH_MAX_BYTES:
+                    return ""
+                h.update(chunk)
+        return h.hexdigest()
+    except OSError:
+        return ""
 
 
 class ProcessResponder:
@@ -230,7 +279,8 @@ class ProcessResponder:
             hint = meta.get("process") or ""
             cmd_hint = meta.get("cmdline") or ""
             self._respond_to_pid(pid, f"{sig.detector}/{sig.name}",
-                                  name_hint=hint, cmd_hint=cmd_hint)
+                                  name_hint=hint, cmd_hint=cmd_hint,
+                                  trigger=sig, score=score, level=level)
 
             # 1b. Parent escalation: ransomware drives destruction through
             #     LOLBins/tools (vssadmin, powershell, cmd, wbadmin, ...) that
@@ -240,7 +290,8 @@ class ProcessResponder:
             ppid = self._extract_parent_pid(sig)
             if ppid and ppid != pid and self._is_lolbin_signal(sig):
                 self._respond_to_pid(
-                    ppid, f"{sig.detector}/{sig.name} (parent of pid={pid})")
+                    ppid, f"{sig.detector}/{sig.name} (parent of pid={pid})",
+                    trigger=sig, score=score, level=level)
 
         # 2. Score-wide reaction: if the rolling score went CRITICAL, sweep
         #    every PID that has contributed in the current window.
@@ -288,17 +339,41 @@ class ProcessResponder:
             pid = self._extract_pid(sig)
             if pid:
                 pids.add(pid)
+        score = self.engine.current_score()
+        level = self.engine.current_level()
         for pid in pids:
-            self._respond_to_pid(pid, "score_critical_sweep")
+            self._respond_to_pid(pid, "score_critical_sweep",
+                                 score=score, level=level)
 
     # ---------------------------------------------------- core kill logic
 
     def _respond_to_pid(self, pid: int, reason: str,
-                        name_hint: str = "", cmd_hint: str = "") -> KillAction:
+                        name_hint: str = "", cmd_hint: str = "",
+                        trigger: Optional[Signal] = None,
+                        score: Optional[int] = None,
+                        level: Optional[Severity] = None) -> KillAction:
         if pid == self._own_pid:
             return self._noop(pid, reason, "refusing to kill self")
 
         proc_name, cmdline, exe_path = self._lookup(pid)
+        # 행동 시점 포렌식 캡처: 프로세스가 살아 있는 지금이 마지막 기회다.
+        # (종료 후에는 username/ppid 조회가 실패하고, 일회성 도구는 이미지
+        # 경로조차 못 얻는다.)  보고서가 라이브 엔진 대신 이 값을 쓴다.
+        # 이미지 SHA-256 은 여기서 계산하지 *않는다* — 최대 64MB 디스크 읽기를
+        # 차단 앞에 두면 그 시간만큼 암호화가 진행된다.  경로 문자열만 캡처해
+        # 두고, 격리/종료가 끝난 뒤 해시한다(이미지 파일은 디스크에 남는다).
+        username, ppid, parent_name = self._proc_owner(pid)
+        ctx = {
+            "exe_path": exe_path,
+            "exe_sha256": "",
+            "username": username,
+            "ppid": ppid,
+            "parent_name": parent_name,
+            "score_at_action": score,
+            "level_at_action": level.value if level is not None else "",
+            "trigger_signal": trigger.to_dict() if trigger is not None else None,
+            "detect_ts": trigger.timestamp if trigger is not None else None,
+        }
 
         # never-kill 판정은 *조회된* 이름/경로로만 한다(힌트로 판정을 바꾸지
         # 않음).  판정 후, 표시용 이름/명령줄이 비어 있을 때만 탐지 시점
@@ -339,17 +414,19 @@ class ProcessResponder:
             return KillAction(time.time(), pid, proc_name, cmdline, reason,
                               self.mode.value, quarantined=already_quar,
                               terminated=already_killed,
-                              error="already handled")
+                              error="already handled", **ctx)
 
         quarantined = already_quar
         terminated  = already_killed
         error: Optional[str] = None
 
         if self.mode == ResponderMode.OFF:
+            # OFF 모드는 차단하지 않으므로 지연 걱정 없이 지금 해시해도 된다.
+            ctx["exe_sha256"] = _hash_exe(exe_path)
             action = KillAction(time.time(), pid, proc_name, cmdline, reason,
                                 self.mode.value, quarantined=False,
                                 terminated=False,
-                                error="responder mode = off")
+                                error="responder mode = off", **ctx)
             return self._record(action)
 
         if self.minifilter is not None and not already_quar:
@@ -371,10 +448,25 @@ class ProcessResponder:
                 with self._lock:
                     self._already_killed.add(pid)
 
+        # 위협이 멈춘 *뒤에* 이미지를 해시한다 — 차단 경로에 디스크 I/O 를
+        # 더하지 않으면서, 보고서·사이드카에는 해시가 담기게 (_record 이전).
+        ctx["exe_sha256"] = _hash_exe(exe_path)
         action = KillAction(time.time(), pid, proc_name, cmdline, reason,
                             self.mode.value, quarantined=quarantined,
-                            terminated=terminated, error=error)
-        return self._record(action)
+                            terminated=terminated, error=error, **ctx)
+        result = self._record(action)
+
+        # The culprit is dead — drop its signals from the live scoring window
+        # so the global threat level falls back to "안전" on its own once every
+        # active threat is neutralized, instead of staying RED until the
+        # operator hits the reset button.  Done *after* _record(): on_action
+        # builds the incident report inside that call, and the report's primary
+        # evidence is the action-time capture above, so nothing is lost.
+        # (Regression note: this call was accidentally dropped in 1ee4263.)
+        if result.terminated:
+            self.engine.forget_pid(pid)
+
+        return result
 
     def _noop(self, pid: int, reason: str, why: str) -> KillAction:
         action = KillAction(time.time(), pid, "", "", reason,
@@ -447,6 +539,45 @@ class ProcessResponder:
         except Exception:
             exe = ""
         return (name, cmd, exe)
+
+    def _proc_owner(self, pid: int) -> tuple[str, Optional[int], str]:
+        """``(username, ppid, parent_name)`` — 감염 경로 추적용 (best-effort).
+
+        각 조회는 독립적으로 실패할 수 있으므로(AccessDenied, 프로세스 소멸)
+        하나가 실패해도 나머지는 채운다.  실패 값은 ""/None.
+        """
+        if not HAS_PSUTIL:
+            return ("", None, "")
+        try:
+            p = psutil.Process(pid)
+        except Exception:
+            return ("", None, "")
+        username = ""
+        ppid: Optional[int] = None
+        parent_name = ""
+        try:
+            username = p.username() or ""
+        except Exception:
+            pass
+        # p.parent() 는 부모의 생성 시각까지 대조해 PID 재사용을 걸러낸다 —
+        # ppid 숫자로 psutil.Process(ppid) 를 새로 여는 것보다 안전하다
+        # (그 사이 부모가 죽고 PID 가 재활용되면 엉뚱한 프로세스를 보고한다).
+        try:
+            parent = p.parent()
+            if parent is not None:
+                ppid = parent.pid
+                try:
+                    parent_name = parent.name() or ""
+                except Exception:
+                    pass
+            else:
+                ppid = p.ppid() or None
+        except Exception:
+            try:
+                ppid = p.ppid() or None
+            except Exception:
+                pass
+        return (username, ppid, parent_name)
 
     def _terminate(self, pid: int) -> tuple[bool, Optional[str]]:
         # Prefer psutil — it works cross-platform and handles permissions.
