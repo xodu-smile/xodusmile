@@ -285,29 +285,6 @@ class ProcessResponder:
         # burst 가 합산 점수만 넘겨도 윈도우의 모든 PID 가 종료되는 참사를
         # never-kill 목록 하나에 기대 막아야 했기 때문.  ab743d1 참조.)
         pid = self._extract_pid(sig)
-<<<<<<< HEAD
-        if pid and sig.severity in (Severity.HIGH, Severity.CRITICAL):
-            # 탐지 시점에 신호가 들고 온 프로세스 이름/명령줄.  일회성 도구
-            # (vssadmin/wmic 등)는 차단 시점엔 이미 종료돼 psutil 조회가
-            # 실패하므로, 이 값들을 표시용 폴백으로 넘긴다.
-            meta = sig.metadata or {}
-            hint = meta.get("process") or ""
-            cmd_hint = meta.get("cmdline") or ""
-            self._respond_to_pid(pid, f"{sig.detector}/{sig.name}",
-                                  name_hint=hint, cmd_hint=cmd_hint,
-                                  trigger=sig, score=score, level=level)
-
-            # 1b. Parent escalation: ransomware drives destruction through
-            #     LOLBins/tools (vssadmin, powershell, cmd, wbadmin, ...) that
-            #     are either transient or on the never-kill list.  Killing the
-            #     tool is too late or refused, so also terminate the PARENT that
-            #     issued the command — that is the actual malware body.
-            ppid = self._extract_parent_pid(sig)
-            if ppid and ppid != pid and self._is_lolbin_signal(sig):
-                self._respond_to_pid(
-                    ppid, f"{sig.detector}/{sig.name} (parent of pid={pid})",
-                    trigger=sig, score=score, level=level)
-=======
         if not pid or sig.severity not in (Severity.HIGH, Severity.CRITICAL):
             return
 
@@ -326,8 +303,11 @@ class ProcessResponder:
                                   name_hint=hint, cmd_hint=cmd_hint)
             return
 
-        self._respond_to_pid(pid, reason, name_hint=hint, cmd_hint=cmd_hint)
->>>>>>> master
+        # trigger/score/level: 행동 시점 포렌식 컨텍스트 — 보고서가 라이브
+        # 엔진을 재조회하지 않고 이 캡처를 1차 근거로 쓴다 (120초 윈도우
+        # 퇴거로 인한 "차단했는데 근거 0" 자기모순 방지).
+        self._respond_to_pid(pid, reason, name_hint=hint, cmd_hint=cmd_hint,
+                             trigger=sig, score=score, level=level)
 
         # Parent escalation: ransomware drives destruction through
         # LOLBins/tools (vssadmin, powershell, cmd, wbadmin, ...) that
@@ -337,7 +317,8 @@ class ProcessResponder:
         ppid = self._extract_parent_pid(sig)
         if ppid and ppid != pid and self._is_lolbin_signal(sig):
             self._respond_to_pid(
-                ppid, f"{reason} (parent of pid={pid})")
+                ppid, f"{reason} (parent of pid={pid})",
+                trigger=sig, score=score, level=level)
 
     def _is_confident(self, pid: int, sig: Signal) -> bool:
         """Decide whether the evidence justifies acting on ``pid``.
@@ -390,32 +371,6 @@ class ProcessResponder:
         name = (meta.get("process") or "").lower()
         return name in ESCALATE_CHILD_NAMES
 
-<<<<<<< HEAD
-    # Severities that make a PID a sweep target.  We deliberately exclude
-    # INFO/LOW: a benign process that merely deleted a temp/cache file
-    # (e.g. file_delete, weight 3, LOW) shows up in the window but must NOT
-    # be terminated just because the *aggregate* score is CRITICAL.  Only
-    # PIDs that themselves emitted a genuinely suspicious signal
-    # (persistence, shadow-copy/BCD tampering, mass rename, canary, …) are
-    # swept.  Without this filter the sweep massacres bystander processes.
-    _SWEEP_SEVERITIES = (Severity.MEDIUM, Severity.HIGH, Severity.CRITICAL)
-
-    def _sweep_window(self) -> None:
-        pids: Set[int] = set()
-        for sig in self.engine.recent_signals(limit=200):
-            if sig.severity not in self._SWEEP_SEVERITIES:
-                continue
-            pid = self._extract_pid(sig)
-            if pid:
-                pids.add(pid)
-        score = self.engine.current_score()
-        level = self.engine.current_level()
-        for pid in pids:
-            self._respond_to_pid(pid, "score_critical_sweep",
-                                 score=score, level=level)
-
-=======
->>>>>>> master
     # ---------------------------------------------------- core kill logic
 
     def _respond_to_pid(self, pid: int, reason: str,
@@ -527,6 +482,9 @@ class ProcessResponder:
             # 등급이 운영자의 수동 초기화 없이도 스스로 "안전" 으로 복귀하게 한다.
             # 이 호출이 없으면 종료된 PID 의 시그널이 120초 윈도우가 만료될 때까지
             # 점수를 CRITICAL 로 유지해 대시보드가 "위험" 에 고착된다.
+            # (회귀 주의: 1ee4263 에서 이 호출이 실수로 빠진 적이 있다.)
+            # _record() 전에 호출해도 보고서 근거는 잃지 않는다 — 보고서의
+            # 1차 근거는 위의 행동 시점 캡처(ctx)이지 라이브 엔진이 아니다.
             try:
                 self.engine.forget_pid(pid)
             except Exception as e:
@@ -538,19 +496,7 @@ class ProcessResponder:
         action = KillAction(time.time(), pid, proc_name, cmdline, reason,
                             self.mode.value, quarantined=quarantined,
                             terminated=terminated, error=error, **ctx)
-        result = self._record(action)
-
-        # The culprit is dead — drop its signals from the live scoring window
-        # so the global threat level falls back to "안전" on its own once every
-        # active threat is neutralized, instead of staying RED until the
-        # operator hits the reset button.  Done *after* _record(): on_action
-        # builds the incident report inside that call, and the report's primary
-        # evidence is the action-time capture above, so nothing is lost.
-        # (Regression note: this call was accidentally dropped in 1ee4263.)
-        if result.terminated:
-            self.engine.forget_pid(pid)
-
-        return result
+        return self._record(action)
 
     def _noop(self, pid: int, reason: str, why: str) -> KillAction:
         action = KillAction(time.time(), pid, "", "", reason,

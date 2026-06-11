@@ -31,7 +31,7 @@ Windows 11용 **랜섬웨어 전용 소형 EDR** 입니다.
 | **대시보드 인증** *(기업)* | 토큰이 설정되면 상태 변경/관리자 엔드포인트(`/api/reset`, `/api/kill`, `/api/admin/*`)는 `X-API-Key` 또는 `Authorization: Bearer` 를 요구. watchdog 용 `/api/heartbeat` 는 항상 공개. |
 | **중앙 설정 파일** *(기업)* | `ransomguard.toml`/`.json` 로 정책(감시 경로·모드·통합·인증)을 일괄 배포(GPO/Intune/Ansible). 비밀(토큰/Webhook URL)은 환경변수 우선. |
 | **관리자 대시보드 패널** | Flask UI 내 "관리자 패널" — 시스템 상태(드라이버, 감시 폴더, 허용 목록, 통합/인증 상태), 모드 전환, PID 별 위협 분석(ATT&CK 기법 표시), 허용 목록 편집. |
-| **Flask 대시보드** | `http://127.0.0.1:5000` — 실시간 점수, 최근 이벤트, 프로세스 목록, 자동 대응 로그, 수동 kill/release 버튼. |
+| **Flask 대시보드** | `http://127.0.0.1:5000` — 실시간 점수 + 추이 스파크라인, 이벤트 피드(severity·탐지기 필터, 검색, 일시정지), 대응 조치 감사 로그(트리거 신호·SHA-256/VT 링크·부모 프로세스·탐지→대응 지연), MITRE ATT&CK 기법 요약, 프로세스 정렬·위협 PID 하이라이트, 다크(SOC) 테마, 헤더 🔑 버튼으로 운영자 토큰(X-API-Key) 입력, 수동 kill/release. |
 
 ---
 

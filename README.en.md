@@ -29,7 +29,7 @@ process the moment it crosses a threshold.
 | **Dashboard authentication** *(enterprise)* | When a token is configured, mutating and admin endpoints (`/api/reset`, `/api/kill`, `/api/admin/*`) require `X-API-Key` or `Authorization: Bearer`. The watchdog `/api/heartbeat` is always open. |
 | **Central config file** *(enterprise)* | `ransomguard.toml` / `.json` for deploying policy (watch paths, mode, integrations, auth) to fleets via GPO/Intune/Ansible. Secrets (token, webhook URL) are injected via environment variables which always win over the file. |
 | **Administrator dashboard panel** | Collapsible "Administrator" section with system health (driver, watch dirs, allowlist, integration/auth status), mode switcher, per-PID threat breakdown (ATT&CK tags), and allowlist editor. |
-| **Flask dashboard** | `http://127.0.0.1:5000` — live score, recent events, process table, responder log, manual kill/release. |
+| **Flask dashboard** | `http://127.0.0.1:5000` — live score + history sparkline, event feed (severity/detector filters, search, pause), response-action audit log (trigger signal, SHA-256 + VirusTotal link, parent process, detect→respond latency), MITRE ATT&CK technique summary, sortable process table with threat-PID highlighting, dark SOC theme, operator-token (X-API-Key) entry via the 🔑 header button, manual kill/release. |
 
 ## Scoring
 

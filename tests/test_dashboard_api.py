@@ -519,3 +519,40 @@ class TestApiRelease:
             content_type="application/json",
         )
         assert resp.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# GET / — 전문가용 대시보드 UI 요소가 템플릿에 렌더되는지 (스펙 수용 기준)
+# ---------------------------------------------------------------------------
+
+class TestIndexExpertUi:
+    def test_index_renders_200(self, client):
+        c, agent = client
+        resp = c.get("/")
+        assert resp.status_code == 200
+
+    def test_expert_dom_ids_present(self, client):
+        c, agent = client
+        html = c.get("/").get_data(as_text=True)
+        # 전문가(SOC) 기능별 핵심 DOM 앵커 — 하나라도 빠지면 해당 패널이
+        # 통째로 사라진 회귀다.
+        for anchor in (
+            'id="score-spark"',      # 위험도 추이 스파크라인
+            'id="actions-list"',     # 대응 조치 로그 (감사 추적)
+            'id="ev-search"',        # 이벤트 검색
+            'id="ev-detector"',      # 탐지기 필터
+            'id="ev-pause"',         # 피드 일시정지
+            'id="attack-summary"',   # MITRE ATT&CK 요약
+            'id="token-btn"',        # 운영자 토큰 (X-API-Key)
+            'id="theme-toggle"',     # 다크/라이트 테마
+            'id="conn-pill"',        # 연결 상태 표시
+            'data-sort="cpu"',       # 프로세스 정렬 헤더
+        ):
+            assert anchor in html, f"missing expert-UI anchor: {anchor}"
+
+    def test_auth_fetch_wiring_present(self, client):
+        c, agent = client
+        html = c.get("/").get_data(as_text=True)
+        # 모든 API 호출이 토큰 부착 경로(authFetch)를 쓰는지의 1차 방어선.
+        assert "function authFetch" in html
+        assert "X-API-Key" in html

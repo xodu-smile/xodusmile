@@ -1,10 +1,6 @@
 {
   "version": "1.0.0",
-<<<<<<< HEAD
-  "lastScanned": 1781162381675,
-=======
-  "lastScanned": 1781042754071,
->>>>>>> master
+  "lastScanned": 1781164904877,
   "projectRoot": "/home/namaek2/ransomware_detector",
   "techStack": {
     "languages": [
@@ -23,11 +19,7 @@
   },
   "build": {
     "buildCommand": null,
-<<<<<<< HEAD
-    "testCommand": "python -m pytest -q 2>&1 | tail -3",
-=======
-    "testCommand": "cat >> /home/namaek2/ransomware_detector/README.en.md << 'EOF'\n\n## Further reading\n\n- Korean README: [`README.md`](./README.md)\n- Developer wiki: [`docs/WIKI.en.md`](./docs/WIKI.en.md) / [`docs/WIKI.ko.md`](./docs/WIKI.ko.md)\n- Capstone report (Korean): [`docs/CAPSTONE_REPORT.ko.md`](./docs/CAPSTONE_REPORT.ko.md)\n- Design rationale — why each signal weight/threshold has its value (Korean): [`docs/DESIGN_RATIONALE.ko.md`](./docs/DESIGN_RATIONALE.ko.md)\nEOF\ngrep -rn \"critical_threshold\" docs/ README*.md; python -m pytest -q 2>&1 | tail -1",
->>>>>>> master
+    "testCommand": "python -m pytest -q 2>&1 | tail -2; git diff --stat | tail -8",
     "lintCommand": null,
     "devCommand": null,
     "scripts": {}
@@ -53,13 +45,8 @@
     "__pycache__": {
       "path": "__pycache__",
       "purpose": null,
-<<<<<<< HEAD
       "fileCount": 13,
-      "lastAccessed": 1781162381672,
-=======
-      "fileCount": 12,
-      "lastAccessed": 1781042754067,
->>>>>>> master
+      "lastAccessed": 1781164904870,
       "keyFiles": [
         "__init__.cpython-314.pyc",
         "actor_trust.cpython-314.pyc",
@@ -72,11 +59,7 @@
       "path": "dashboard",
       "purpose": null,
       "fileCount": 1,
-<<<<<<< HEAD
-      "lastAccessed": 1781162381672,
-=======
-      "lastAccessed": 1781042754069,
->>>>>>> master
+      "lastAccessed": 1781164904873,
       "keyFiles": [
         "app.py"
       ]
@@ -85,11 +68,7 @@
       "path": "detectors",
       "purpose": null,
       "fileCount": 10,
-<<<<<<< HEAD
-      "lastAccessed": 1781162381672,
-=======
-      "lastAccessed": 1781042754069,
->>>>>>> master
+      "lastAccessed": 1781164904873,
       "keyFiles": [
         "__init__.py",
         "base.py",
@@ -101,14 +80,12 @@
     "docs": {
       "path": "docs",
       "purpose": "Documentation",
-      "fileCount": 3,
-<<<<<<< HEAD
-      "lastAccessed": 1781162381673,
-=======
-      "lastAccessed": 1781042754069,
->>>>>>> master
+      "fileCount": 5,
+      "lastAccessed": 1781164904874,
       "keyFiles": [
         "ADMIN_GUIDE.md",
+        "CAPSTONE_REPORT.ko.md",
+        "DESIGN_RATIONALE.ko.md",
         "WIKI.en.md",
         "WIKI.ko.md"
       ]
@@ -117,11 +94,7 @@
       "path": "minifilter",
       "purpose": null,
       "fileCount": 7,
-<<<<<<< HEAD
-      "lastAccessed": 1781162381674,
-=======
-      "lastAccessed": 1781042754069,
->>>>>>> master
+      "lastAccessed": 1781164904874,
       "keyFiles": [
         "README.md",
         "RansomGuard.c",
@@ -134,11 +107,7 @@
       "path": "scripts",
       "purpose": "Build/utility scripts",
       "fileCount": 10,
-<<<<<<< HEAD
-      "lastAccessed": 1781162381674,
-=======
-      "lastAccessed": 1781042754069,
->>>>>>> master
+      "lastAccessed": 1781164904874,
       "keyFiles": [
         "_common.ps1",
         "bootstrap.ps1",
@@ -151,11 +120,7 @@
       "path": "tests",
       "purpose": "Test files",
       "fileCount": 15,
-<<<<<<< HEAD
-      "lastAccessed": 1781162381674,
-=======
-      "lastAccessed": 1781042754070,
->>>>>>> master
+      "lastAccessed": 1781164904874,
       "keyFiles": [
         "conftest.py",
         "simulator.py",
@@ -168,399 +133,117 @@
       "path": "dashboard/static",
       "purpose": "Static files",
       "fileCount": 0,
-<<<<<<< HEAD
-      "lastAccessed": 1781162381674,
-=======
-      "lastAccessed": 1781042754070,
->>>>>>> master
+      "lastAccessed": 1781164904875,
       "keyFiles": []
     }
   },
   "hotPaths": [
     {
-      "path": "incident_report.py",
-      "accessCount": 31,
-      "lastAccessed": 1781164415403,
+      "path": "dashboard/templates/index.html",
+      "accessCount": 34,
+      "lastAccessed": 1781167384915,
+      "type": "file"
+    },
+    {
+      "path": "responder.py",
+      "accessCount": 18,
+      "lastAccessed": 1781167417013,
+      "type": "file"
+    },
+    {
+      "path": "tests/test_responder.py",
+      "accessCount": 7,
+      "lastAccessed": 1781167305077,
+      "type": "file"
+    },
+    {
+      "path": "dashboard/app.py",
+      "accessCount": 4,
+      "lastAccessed": 1781167416657,
       "type": "file"
     },
     {
       "path": "agent.py",
-      "accessCount": 32,
-      "lastAccessed": 1781060387597,
-      "type": "file"
-    },
-    {
-      "path": "responder.py",
-      "accessCount": 27,
-      "lastAccessed": 1781164431262,
-      "type": "file"
-    },
-    {
-      "path": "docs/WIKI.ko.md",
-<<<<<<< HEAD
-      "accessCount": 19,
-      "lastAccessed": 1781164261720,
-      "type": "file"
-    },
-    {
-      "path": "scoring.py",
-      "accessCount": 16,
-      "lastAccessed": 1781163994177,
-=======
-      "accessCount": 21,
-      "lastAccessed": 1781061688699,
-      "type": "file"
-    },
-    {
-      "path": "responder.py",
-      "accessCount": 20,
-      "lastAccessed": 1781061127750,
->>>>>>> master
-      "type": "file"
-    },
-    {
-      "path": "detectors/ransom_note.py",
-      "accessCount": 18,
-      "lastAccessed": 1781060101404,
-      "type": "file"
-    },
-    {
-      "path": "docs/WIKI.en.md",
-<<<<<<< HEAD
-      "accessCount": 15,
-      "lastAccessed": 1781164242209,
-      "type": "file"
-    },
-    {
-      "path": "README.md",
-      "accessCount": 13,
-      "lastAccessed": 1780942794711,
-      "type": "file"
-    },
-    {
-=======
-      "accessCount": 16,
-      "lastAccessed": 1781061691146,
-      "type": "file"
-    },
-    {
-      "path": "incident_report.py",
-      "accessCount": 14,
-      "lastAccessed": 1781060515836,
-      "type": "file"
-    },
-    {
-      "path": "README.md",
-      "accessCount": 14,
-      "lastAccessed": 1781061695677,
-      "type": "file"
-    },
-    {
-      "path": "scoring.py",
-      "accessCount": 13,
-      "lastAccessed": 1781061127033,
-      "type": "file"
-    },
-    {
-      "path": "detectors/process_watcher.py",
-      "accessCount": 12,
-      "lastAccessed": 1781060281137,
-      "type": "file"
-    },
-    {
-      "path": "detectors/mass_io.py",
-      "accessCount": 12,
-      "lastAccessed": 1781060669315,
-      "type": "file"
-    },
-    {
->>>>>>> master
-      "path": "dashboard/app.py",
-      "accessCount": 11,
-      "lastAccessed": 1780943772414,
-      "type": "file"
-    },
-    {
-      "path": "allowlist.py",
-      "accessCount": 11,
-      "lastAccessed": 1781061155243,
-      "type": "file"
-    },
-    {
-      "path": "README.en.md",
-      "accessCount": 10,
-      "lastAccessed": 1780942896442,
-      "type": "file"
-    },
-    {
-<<<<<<< HEAD
-      "path": "detectors/process_watcher.py",
-      "accessCount": 10,
-      "lastAccessed": 1780942970976,
-      "type": "file"
-    },
-    {
-      "path": "detectors/mass_io.py",
-      "accessCount": 9,
-      "lastAccessed": 1780941382706,
-      "type": "file"
-    },
-    {
-      "path": "attack_map.py",
-      "accessCount": 9,
-      "lastAccessed": 1781162676572,
-=======
-      "path": "attack_map.py",
-      "accessCount": 10,
-      "lastAccessed": 1781060387927,
->>>>>>> master
-      "type": "file"
-    },
-    {
-      "path": "integrations.py",
-      "accessCount": 8,
-      "lastAccessed": 1780943750371,
-      "type": "file"
-    },
-    {
-      "path": "detectors/process_cmdline.py",
-      "accessCount": 8,
-      "lastAccessed": 1781060261427,
-      "type": "file"
-    },
-    {
-      "path": "dashboard/templates/index.html",
-      "accessCount": 6,
-      "lastAccessed": 1780939761307,
-      "type": "file"
-    },
-    {
-      "path": "tests/test_scoring.py",
-      "accessCount": 5,
-      "lastAccessed": 1780942295403,
-      "type": "file"
-    },
-    {
-      "path": "config.py",
-      "accessCount": 5,
-      "lastAccessed": 1781059864329,
-      "type": "file"
-    },
-    {
-      "path": "detectors/base.py",
-      "accessCount": 5,
-<<<<<<< HEAD
-      "lastAccessed": 1781162886166,
-=======
-      "lastAccessed": 1781059898157,
-      "type": "file"
-    },
-    {
-      "path": "detectors/canary.py",
-      "accessCount": 5,
-      "lastAccessed": 1781060091043,
-      "type": "file"
-    },
-    {
-      "path": "actor_trust.py",
-      "accessCount": 5,
-      "lastAccessed": 1781060280821,
->>>>>>> master
-      "type": "file"
-    },
-    {
-      "path": "docs/ADMIN_GUIDE.md",
-      "accessCount": 4,
-      "lastAccessed": 1780943293810,
-      "type": "file"
-    },
-    {
-      "path": "tests/test_ransom_note.py",
-      "accessCount": 4,
-      "lastAccessed": 1780943814284,
-      "type": "file"
-    },
-    {
-      "path": "detectors/process_kernel.py",
-      "accessCount": 4,
-      "lastAccessed": 1781060290712,
-      "type": "file"
-    },
-    {
-      "path": "tests/simulator.py",
       "accessCount": 3,
-      "lastAccessed": 1780939651551,
+      "lastAccessed": 1781167219192,
+      "type": "file"
+    },
+    {
+      "path": "attack_map.py",
+      "accessCount": 2,
+      "lastAccessed": 1781167393562,
       "type": "file"
     },
     {
       "path": "tests/test_dashboard_api.py",
-      "accessCount": 3,
-      "lastAccessed": 1780942472678,
-      "type": "file"
-    },
-    {
-      "path": "tests/test_integrations.py",
-      "accessCount": 3,
-      "lastAccessed": 1780943804682,
-      "type": "file"
-    },
-    {
-      "path": "tamper.py",
-      "accessCount": 3,
-      "lastAccessed": 1781059900468,
-      "type": "file"
-    },
-    {
-      "path": "detectors/minifilter_bridge.py",
-      "accessCount": 3,
-      "lastAccessed": 1781060290209,
-      "type": "file"
-    },
-    {
-      "path": "detectors/registry_kernel.py",
-      "accessCount": 3,
-      "lastAccessed": 1781060290993,
-      "type": "file"
-    },
-    {
-      "path": "tests/test_responder.py",
-      "accessCount": 3,
-      "lastAccessed": 1781060531856,
-      "type": "file"
-    },
-    {
-      "path": "event_store.py",
       "accessCount": 2,
-      "lastAccessed": 1780938949277,
+      "lastAccessed": 1781167524961,
+      "type": "file"
+    },
+    {
+      "path": "README.md",
+      "accessCount": 2,
+      "lastAccessed": 1781167604577,
+      "type": "file"
+    },
+    {
+      "path": "README.en.md",
+      "accessCount": 2,
+      "lastAccessed": 1781167607533,
+      "type": "file"
+    },
+    {
+      "path": "docs/deliverables/_gen.py",
+      "accessCount": 2,
+      "lastAccessed": 1781167684801,
+      "type": "file"
+    },
+    {
+      "path": "docs/deliverables/images/01_features.png",
+      "accessCount": 2,
+      "lastAccessed": 1781167716328,
+      "type": "file"
+    },
+    {
+      "path": "docs/deliverables/images/03_wbs.png",
+      "accessCount": 2,
+      "lastAccessed": 1781167717336,
+      "type": "file"
+    },
+    {
+      "path": "docs/deliverables/images/02_asis.png",
+      "accessCount": 2,
+      "lastAccessed": 1781167717404,
+      "type": "file"
+    },
+    {
+      "path": "docs/deliverables/images/04_process.png",
+      "accessCount": 2,
+      "lastAccessed": 1781167725008,
+      "type": "file"
+    },
+    {
+      "path": "docs/deliverables/images/05_ia.png",
+      "accessCount": 2,
+      "lastAccessed": 1781167725567,
+      "type": "file"
+    },
+    {
+      "path": "docs/deliverables/images/06_architecture.png",
+      "accessCount": 2,
+      "lastAccessed": 1781167726075,
+      "type": "file"
+    },
+    {
+      "path": "scoring.py",
+      "accessCount": 1,
+      "lastAccessed": 1781167305819,
       "type": "file"
     },
     {
       "path": "requirements.txt",
-      "accessCount": 2,
-      "lastAccessed": 1780942852780,
-      "type": "file"
-    },
-    {
-      "path": "tests/test_config.py",
-      "accessCount": 2,
-      "lastAccessed": 1780943822883,
-      "type": "file"
-    },
-    {
-      "path": "scan_damage.py",
-<<<<<<< HEAD
-      "accessCount": 2,
-      "lastAccessed": 1781162677400,
-      "type": "file"
-    },
-    {
-      "path": "tests/test_incident_report.py",
-      "accessCount": 2,
-      "lastAccessed": 1781162727602,
-      "type": "file"
-    },
-    {
-      "path": "detectors/minifilter_bridge.py",
-      "accessCount": 2,
-      "lastAccessed": 1781162769490,
-      "type": "file"
-    },
-    {
-      "path": "detectors/registry_kernel.py",
-=======
->>>>>>> master
       "accessCount": 1,
-      "lastAccessed": 1780938489347,
-      "type": "file"
-    },
-    {
-      "path": "postmortem.py",
-      "accessCount": 1,
-      "lastAccessed": 1780938510424,
-      "type": "file"
-    },
-    {
-      "path": "console.py",
-      "accessCount": 1,
-      "lastAccessed": 1780938512540,
-      "type": "file"
-    },
-    {
-      "path": "watchdog_service.py",
-      "accessCount": 1,
-      "lastAccessed": 1780938512888,
-      "type": "file"
-    },
-    {
-      "path": "service.py",
-      "accessCount": 1,
-      "lastAccessed": 1780938513203,
-      "type": "file"
-    },
-    {
-      "path": "docs/deliverables/01_기능명세서.md",
-      "accessCount": 1,
-      "lastAccessed": 1780938521604,
-      "type": "file"
-    },
-    {
-      "path": "docs/deliverables/06_아키텍처.md",
-      "accessCount": 1,
-      "lastAccessed": 1780938521813,
-      "type": "file"
-    },
-    {
-      "path": "docs/deliverables/README.md",
-      "accessCount": 1,
-      "lastAccessed": 1780938524618,
-      "type": "file"
-    },
-    {
-      "path": "pytest.ini",
-      "accessCount": 1,
-      "lastAccessed": 1780939660107,
-      "type": "file"
-    },
-    {
-      "path": "tests/conftest.py",
-      "accessCount": 1,
-      "lastAccessed": 1780939666261,
-      "type": "file"
-    },
-    {
-      "path": "tests/test_attack_map.py",
-      "accessCount": 1,
-      "lastAccessed": 1780939749006,
-      "type": "file"
-    },
-    {
-      "path": "tests/test_allowlist.py",
-      "accessCount": 1,
-      "lastAccessed": 1780939797484,
-      "type": "file"
-    },
-    {
-      "path": "tests/test_mass_io.py",
-      "accessCount": 1,
-      "lastAccessed": 1780939845497,
-      "type": "file"
-    },
-    {
-      "path": "requirements-dev.txt",
-      "accessCount": 1,
-      "lastAccessed": 1780939903485,
-      "type": "file"
-    },
-    {
-<<<<<<< HEAD
-      "path": "tests/test_responder.py",
-      "accessCount": 1,
-      "lastAccessed": 1780939945973,
-=======
-      "path": "tests/test_incident_report.py",
-      "accessCount": 1,
-      "lastAccessed": 1780939989233,
->>>>>>> master
+      "lastAccessed": 1781167427792,
       "type": "file"
     }
   ],
