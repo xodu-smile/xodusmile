@@ -445,4 +445,6 @@ RansomGuard 는 여러 계층에서 오탐을 줄이도록 설계했습니다:
 - 영문 README: [`README.en.md`](./README.en.md)
 - 상세 위키 (한글): [`docs/WIKI.ko.md`](./docs/WIKI.ko.md)
 - 상세 위키 (영문): [`docs/WIKI.en.md`](./docs/WIKI.en.md)
+- 캡스톤 결과 보고서: [`docs/CAPSTONE_REPORT.ko.md`](./docs/CAPSTONE_REPORT.ko.md)
+- 설계 근거(신호 가중치·임계값): [`docs/DESIGN_RATIONALE.ko.md`](./docs/DESIGN_RATIONALE.ko.md)
 - 산출물 문서: [`docs/deliverables/`](./docs/deliverables/)

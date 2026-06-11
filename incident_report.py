@@ -77,6 +77,19 @@ _CAMPAIGN_FINALIZE_POLL_SECS = 5.0
 # only; on POSIX getattr falls back to 0, a valid no-op creationflags value.
 _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
+
+def _hidden_startupinfo():
+    """Belt-and-suspenders to CREATE_NO_WINDOW: on Windows also pass a
+    STARTUPINFO with STARTF_USESHOWWINDOW|SW_HIDE so the spawned process can
+    never momentarily flash a window even on builds where CREATE_NO_WINDOW
+    alone leaves a brief black rectangle.  Returns None off-Windows."""
+    if platform.system() != "Windows":
+        return None
+    si = subprocess.STARTUPINFO()
+    si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    si.wShowWindow = 0  # SW_HIDE
+    return si
+
 # ---- 비전공자용 한글 표기 ------------------------------------------------
 # 보고서는 운영자(주로 비전공자)가 바로 이해할 수 있게 한국어 + 평이한 설명
 # 으로 작성한다.  기술 상세(신호 표, 원시 JSON)는 하단 "기술 상세" 섹션에
@@ -193,7 +206,9 @@ SIGNAL_WHY = {
 }
 
 # 종합 점수가 최고 수준(CRITICAL)에 도달했을 때, 같은 시간대에 활동한 PID 를
-# 함께 차단하는 sweep 의 reason 코드.  responder._sweep_window 가 사용한다.
+# 함께 차단하던 구버전 sweep 의 reason 코드.  현재 responder 는 PID 명시 +
+# corroboration 방식이라 이 사유를 새로 만들지 않지만, 과거 DB/액션 로그를
+# 읽을 때를 위해 해석은 유지한다.
 _SWEEP_REASON = "score_critical_sweep"
 
 # JSON 사이드카의 경로 배열 상한 — 공격자가 건드린 파일 수에 비례해 산출물이
@@ -1637,24 +1652,44 @@ class IncidentReporter:
         print(f"\a[NOTIFY] {title}\n         {body}")
 
     def _notify_windows(self, title: str, body: str) -> None:
-        # Preferred: win10toast (pure-python, uses pywin32 under the hood).
+        # NOTE: win10toast was removed on purpose.  It builds its toast as an
+        # in-process Win32 window, which on Win10/11 flashes as a black
+        # rectangle in the centre of the screen — one per incident — so a
+        # real-sample incident storm reads as the screen "blinking".  Because
+        # that window lives in *our* process, CREATE_NO_WINDOW (a subprocess
+        # flag) cannot suppress it.  A PowerShell toast spawned with
+        # CREATE_NO_WINDOW creates no window of its own and never flickers, so
+        # we route all desktop notifications through one no-window PowerShell
+        # call: BurntToast if the operator has the module, else the built-in
+        # WinRT toast API (no third-party module required).
+        ps = (
+            "$ErrorActionPreference='Stop';"
+            f"$t={self._psq(title)};$b={self._psq(body)};"
+            "try{"
+            "Import-Module BurntToast -ErrorAction Stop;"
+            "New-BurntToastNotification -Text $t,$b;"
+            "}catch{"
+            "[Windows.UI.Notifications.ToastNotificationManager,"
+            "Windows.UI.Notifications,ContentType=WindowsRuntime]|Out-Null;"
+            "$tpl=[Windows.UI.Notifications.ToastNotificationManager]::"
+            "GetTemplateContent("
+            "[Windows.UI.Notifications.ToastTemplateType]::ToastText02);"
+            "$n=$tpl.GetElementsByTagName('text');"
+            "$n.Item(0).AppendChild($tpl.CreateTextNode($t))|Out-Null;"
+            "$n.Item(1).AppendChild($tpl.CreateTextNode($b))|Out-Null;"
+            "$toast=[Windows.UI.Notifications.ToastNotification]::new($tpl);"
+            "$aid='{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}"
+            "\\WindowsPowerShell\\v1.0\\powershell.exe';"
+            "[Windows.UI.Notifications.ToastNotificationManager]::"
+            "CreateToastNotifier($aid).Show($toast);"
+            "}"
+        )
         try:
-            from win10toast import ToastNotifier  # type: ignore
-            ToastNotifier().show_toast(title, body, duration=8, threaded=True)
-            return
-        except Exception:
-            pass
-        # Fallback: PowerShell BurntToast module if the operator has it.
-        try:
-            ps = (
-                "$ErrorActionPreference='Stop';"
-                "Import-Module BurntToast;"
-                f"New-BurntToastNotification -Text {self._psq(title)},"
-                f"{self._psq(body)}"
-            )
             r = subprocess.run(
-                ["powershell", "-NoProfile", "-Command", ps],
+                ["powershell", "-NoProfile", "-WindowStyle", "Hidden",
+                 "-Command", ps],
                 timeout=6, capture_output=True, creationflags=_NO_WINDOW,
+                startupinfo=_hidden_startupinfo(),
             )
             if r.returncode == 0:
                 return

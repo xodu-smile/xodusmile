@@ -325,3 +325,24 @@ class TestCombineTrust:
     def test_single_classifier_works(self):
         combined = combine_trust(lambda s: True)
         assert combined(self._make_sig()) is True
+
+
+class TestPathBoundaryMatching:
+    """경로 접두사는 디렉터리 경계 단위로만 매칭돼야 한다 (보안 경계)."""
+
+    def test_prefix_does_not_match_sibling_with_same_stem(self):
+        # "C:\Trusted" 항목이 "C:\TrustedEvil\..." 을 허용하면 안 된다.
+        e = AllowEntry(kind="path", value=os.path.normcase(r"C:\Trusted"))
+        assert e.matches("", os.path.normcase(r"C:\TrustedEvil\mal.exe")) is False
+
+    def test_prefix_with_double_trailing_separator_matches(self):
+        e = AllowEntry(kind="path", value=os.path.normcase("C:\\Program Files\\Veeam\\\\"))
+        assert e.matches("", os.path.normcase(r"C:\Program Files\Veeam\agent.exe")) is True
+
+    def test_exact_path_entry_matches_itself(self):
+        e = AllowEntry(kind="path", value=os.path.normcase(r"C:\Tools\backup.exe"))
+        assert e.matches("", os.path.normcase(r"C:\Tools\backup.exe")) is True
+
+    def test_separator_only_value_never_matches(self):
+        e = AllowEntry(kind="path", value="\\")
+        assert e.matches("", os.path.normcase(r"C:\anything.exe")) is False

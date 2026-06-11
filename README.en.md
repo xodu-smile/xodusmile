@@ -410,3 +410,10 @@ internal SIEM rules, threat intelligence, and external EDR platforms.
   for offline forensics.  Use the SQLite event store for that.
 - Intermittent encryption (slow writes spread over hours) is not
   specifically modelled — the 120s scoring window will not catch it.
+
+## Further reading
+
+- Korean README: [`README.md`](./README.md)
+- Developer wiki: [`docs/WIKI.en.md`](./docs/WIKI.en.md) / [`docs/WIKI.ko.md`](./docs/WIKI.ko.md)
+- Capstone report (Korean): [`docs/CAPSTONE_REPORT.ko.md`](./docs/CAPSTONE_REPORT.ko.md)
+- Design rationale — why each signal weight/threshold has its value (Korean): [`docs/DESIGN_RATIONALE.ko.md`](./docs/DESIGN_RATIONALE.ko.md)

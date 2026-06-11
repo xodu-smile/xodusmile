@@ -1,0 +1,34 @@
+{
+  "version": 1,
+  "entries": {
+    "445ed27a3872b681d98190bae61ccb84954e1bc4e140df5370be958dee776b3a": {
+      "last_emitted_at_ms": 1781061688577,
+      "message": "Verify changes work after editing. Test functionality before marking complete."
+    },
+    "466399dafa2d20f60587180bad0a07358eb7f2bce724df0ff682f038ad33f5ad": {
+      "last_emitted_at_ms": 1781061626925,
+      "message": "Read multiple files in parallel when possible for faster analysis."
+    },
+    "79a93d4a2f8f50b95f852280616242fee1855dc99a3c75211917f55e72e95fae": {
+      "last_emitted_at_ms": 1781061613469,
+      "message": "Use parallel execution for independent tasks. Use run_in_background for long operations (npm install, builds, tests)."
+    },
+    "1bb6914bc42b891c26d46c8ae2fd4f44071f59862e89dc550f4c82877b700216": {
+      "last_emitted_at_ms": 1781061237425,
+      "message": "The boulder never stops. Continue until all tasks complete."
+    },
+    "b9ef192f0eb1971b2d18ea03da28907b9eff5564c8c14773e2398322bf52b507": {
+      "last_emitted_at_ms": 1781061104215,
+      "message": "Spawning agent: oh-my-claudecode:code-reviewer (inherit) | Task: Review responder/allowlist changes"
+    },
+    "6a2361e2f1b263ae1a5fac8c5dc408150d4758713e116f1a9c1744581bb73889": {
+      "last_emitted_at_ms": 1781059897728,
+      "message": "Spawning agent: Explore (inherit) | Task: Inventory response/trust/scoring logic"
+    },
+    "5bef3c5e26ecf39eee5d0b1286621f07442e8d92438d3fe1a56429d2ad02e478": {
+      "last_emitted_at_ms": 1781059890877,
+      "message": "Spawning agent: Explore (inherit) | Task: Inventory all detector signals"
+    }
+  },
+  "updated_at": "2026-06-10T03:21:28.577Z"
+}

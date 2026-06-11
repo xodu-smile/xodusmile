@@ -52,3 +52,4 @@ minifilter/build_arm64.bat
 Thumbs.db
 desktop.ini
 .DS_Store
+.omc/

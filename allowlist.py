@@ -73,7 +73,16 @@ class AllowEntry:
         if self.kind == "name":
             return bool(name_lower) and name_lower == self.value
         if self.kind == "path":
-            return bool(path_lower) and path_lower.startswith(self.value)
+            # 접두사 비교는 디렉터리 경계 단위로 한다.  끝의 구분자 개수를
+            # 정규화해 "...\Veeam\\" 같은 입력도 매칭되게 하고, 경계 검사로
+            # "C:\Trusted" 가 "C:\TrustedEvil\..." 을 허용하는 일을 막는다.
+            if not path_lower:
+                return False
+            prefix = self.value.rstrip("\\/")
+            if not prefix or not path_lower.startswith(prefix):
+                return False
+            rest = path_lower[len(prefix):]
+            return rest == "" or rest[0] in "\\/"
         return False
 
 
