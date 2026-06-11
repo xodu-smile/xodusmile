@@ -14,6 +14,7 @@
 | 4 | **프로세스 정리도** (Swim-lane) | [`04_프로세스정리도.md`](04_프로세스정리도.md) | [`images/04_process.png`](images/04_process.png) |
 | 5 | **정보 구조 (IA)** | [`05_IA.md`](05_IA.md) | [`images/05_ia.png`](images/05_ia.png) |
 | 6 | **프로젝트 아키텍처** | [`06_아키텍처.md`](06_아키텍처.md) | [`images/06_architecture.png`](images/06_architecture.png) |
+| 7 | **Core 모듈 아키텍처** (발표용) | [`06_아키텍처.md`](06_아키텍처.md) (07 절 참조) | [`images/07_core_architecture.png`](images/07_core_architecture.png) |
 
 ## 다이어그램 재생성
 
@@ -22,8 +23,10 @@ cd docs/deliverables
 python3 _gen.py    # matplotlib + Noto Sans CJK 사용
 ```
 
-`_gen.py` 안의 함수 6개 (`gen_features`, `gen_asis`, `gen_wbs`,
-`gen_process`, `gen_ia`, `gen_architecture`) 가 각각의 PNG 를 `images/` 에 출력한다.
+`_gen.py` 안의 함수 7개 (`gen_features`, `gen_asis`, `gen_wbs`,
+`gen_process`, `gen_ia`, `gen_architecture`, `gen_core_architecture`) 가
+각각의 PNG 를 `images/` 에 출력한다. `01_features`·`06_architecture`·
+`07_core_architecture` 는 **Core 1~4 / Support** 그룹핑을 공통 색상으로 시각화한다.
 
 ## 분류 체계
 
