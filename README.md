@@ -15,23 +15,78 @@ Windows 11용 **랜섬웨어 전용 소형 EDR** 입니다.
 
 ## 주요 기능 (Features)
 
-| 분류 | 설명 |
+탐지는 **커널 드라이버 1개 + 사용자 모드 탐지기 8종**이 담당하고, 모든 신호는
+하나의 점수 엔진(120초 슬라이딩 윈도우)에 합산됩니다. 임계를 넘으면 responder
+가 격리/종료로 대응하고, 사건은 비전문가도 읽을 수 있는 한글 보고서로 자동
+정리됩니다.
+
+### 탐지 (Detection)
+
+| 탐지기 | 구체 동작 |
 |---|---|
-| **커널 미니필터** | `minifilter/RansomGuard.sys` 드라이버가 모든 볼륨에서 `IRP_MJ_CREATE`, `IRP_MJ_WRITE`, `IRP_MJ_SET_INFORMATION` 을 가로채요. `(pid, path, op, bytes)` 형식 이벤트를 필터 통신 포트로 사용자 모드에 스트리밍하고, 격리된 PID 의 후속 쓰기/이름변경을 **커널 안에서 차단** 합니다. |
-| **PID 단위 폭발 감지** | minifilter_bridge 가 PID 별로 쓰기 바이트와 rename 횟수를 누적해요. 짧은 시간 안에 폭증하면 어느 폴더든 상관없이 HIGH 신호 발생. |
-| **협박문 탐지 (내용 기반)** | 파일명 패턴(`HOW_TO_DECRYPT.txt`, `_readme.txt`, `*.hta` 등)**에 더해 파일 내용을 분석**합니다 — 암호화폐 지갑 주소, `.onion` 주소, "your files have been encrypted" 류 협박 문구, 연락처/결제 용어. 그래서 **이름이 무작위인 협박문도(`A7F3C.txt`) 내용으로 탐지**합니다. 단일 확인 노트는 HIGH, **내용으로 확인된 노트가 3개 이상 폴더에 퍼지거나 / 실제 암호화 활동이 동반된 다중 확산이면 CRITICAL**. (이름만 매칭된 단발은 MEDIUM 힌트로만 — 오탐 억제.) |
-| **카나리 파일** | 사용자가 절대 안 건드릴 미끼 파일을 깔아두고 해시로 감시. 변경 시 **단발로 CRITICAL** 발사. |
-| **프로세스 명령어 룰 (33개)** | VSS 섀도카피 삭제·리사이즈, BCD 변조, Defender 비활성화, 로그 삭제, BitLocker 해제, PowerShell 난독화에 더해 — **내장/서명 도구를 암호화 엔진으로 악용**하는 living-off-the-land 룰: `cipher /e`(EFS), BitLocker 강제 암호화(`manage-bde -on`/`Enable-BitLocker`), LOLBin 프록시 실행(`certutil`/`bitsadmin`/`esentutl`/`wmic process call create`), BYOVD(`sc create type=kernel`), 이중 갈취 스테이징(`7z -p`/`rclone`). |
-| **정상 프로세스 악용 탐지** | "정상 프로세스로 작동하는 랜섬웨어" 대응. ① **신뢰 게이트 사각지대 차단** — 신뢰 프로세스(svchost/explorer 등)에 인젝션(T1055)/위장(T1036)된 랜섬웨어가 카나리 변조·매직바이트 소실·랜섬 확장자 변경 같은 *지상 진실(ground-truth)* 암호화를 일으키면, 신뢰 면제를 **무시하고 항상 채점**합니다. ② **시스템 바이너리 위장 탐지** — `%TEMP%\svchost.exe` 처럼 핵심 시스템 이름을 달고 System32 밖에서 실행되는 사칭(T1036.005)을 잡아 즉시 대응. |
-| **프로세스 트리 휴리스틱** | LOLBin 부모-자식 체인(Office → PowerShell, 브라우저 → 스크립트 호스트), 한 부모가 짧은 시간 안에 자식을 다수 spawn 하는 fan-out, psutil 기반 디스크 쓰기 burst. |
-| **자동 대응 (Active Responder)** | 3가지 모드 — `off` / `quarantine` / `kill`. `kill` 모드에서 PID 가 명시된 HIGH/CRITICAL 신호가 발생하면 즉시 커널 격리 + `TerminateProcess`. **lsass, csrss 같은 시스템 핵심 프로세스는 절대 안 죽이는 하드코딩 목록** 으로 보호. |
-| **운영자 허용 목록** | 정상 백업/동기화/압축 앱(Veeam, Acronis, 7-Zip 등)을 프로세스 이름 또는 경로 접두사로 등록해서 **오탐 방지**. 카나리/협박문 확산처럼 높은 신뢰도 신호는 여전히 탐지. |
+| **커널 미니필터** (`minifilter/RansomGuard.sys`) | 모든 볼륨에서 `IRP_MJ_CREATE`, `IRP_MJ_WRITE`, `IRP_MJ_SET_INFORMATION` 을 가로채 `(pid, path, op, bytes)` 이벤트를 필터 통신 포트로 사용자 모드에 스트리밍. 파일 I/O 외에 **프로세스 생성/종료**(`PsSetCreateProcessNotifyRoutineEx`)와 **레지스트리 쓰기**(`CmRegisterCallbackEx`)도 같은 채널로 올립니다. 격리된 PID 의 후속 쓰기/이름변경은 pre-op 에서 **커널 안에서 차단**. |
+| **PID 단위 폭발 감지** (`minifilter_bridge`) | 커널 이벤트를 PID 별로 누적 — **4초 안에 75MB+ 쓰기** 또는 **5초 안에 rename 20회+** 면 HIGH(`kernel_write_burst`/`kernel_rename_burst`). 경로가 아니라 **프로세스 기준**이라 감시 폴더 밖에서 진행되는 암호화도 잡습니다. |
+| **커널 프로세스 감시** (`process_kernel`) | WMI 없이 커널 콜백으로 프로세스 생성 **순간**(첫 명령 실행 전)에 cmdline 룰 33개를 적용. 커맨드라인을 커널 메모리에서 받으므로 **PEB 변조로 숨길 수 없고**, WMI(50~500ms 지연, 부하 시 유실)가 놓치던 단명 프로세스도 포착. |
+| **커널 레지스트리 감시** (`registry_kernel`) | 고가치 키 변조를 채점: Defender 서비스(`WinDefend`/`WdFilter`/`Sense`)·설정·정책 키, SafeBoot, Run/RunOnce 지속화, System 정책(UAC/SmartScreen), 그리고 **RansomGuard 자신의 서비스 키**(드라이버 언로드 시도 = 자기 보호). ctfmon 의 `internat.exe`, Defender 자체 텔레메트리 같은 알려진 정상 쓰기는 값 이름 단위로 제외해 오탐을 막습니다. |
+| **프로세스 명령어 룰 (33개)** (`process_cmdline`) | WMI + 커널 이중 소스로 새 프로세스의 cmdline 을 정규식 검사. VSS 섀도카피 삭제·리사이즈, BCD 변조, Defender/SmartScreen 무력화, 이벤트 로그·USN 저널 삭제, 방화벽 차단, BitLocker 해제에 더해 — **내장/서명 도구를 암호화 엔진으로 악용**하는 living-off-the-land 룰: `cipher /e`(EFS), BitLocker 강제 암호화(`manage-bde -on`/`Enable-BitLocker`), LOLBin 프록시 실행(`certutil`/`bitsadmin`/`esentutl`/`wmic process call create`), BYOVD(`sc create type=kernel`), 이중 갈취 스테이징(`7z -p`/`rclone`), 난독화 PowerShell(인코딩 커맨드·인메모리 다운로더·정책 우회). |
+| **협박문 탐지 (내용 기반)** (`ransom_note`) | 파일명 패턴 12종(`HOW_TO_DECRYPT*`, `_readme.txt` 등)**에 더해 파일 내용을 분석** — 암호화폐 지갑 주소(BTC/ETH/XMR)·`.onion` 주소는 *강* 지표, 협박 문구·복호화 안내·결제 용어·연락 채널·압박 문구는 *약* 지표. **강 지표 1개 이상 + 합계 3점 이상**이어야 "내용 확인"으로 인정 → **이름이 무작위인 협박문(`A7F3C.txt`)도 내용으로 탐지**. 내용 확인 단일 노트는 HIGH, 이름만 매칭은 MEDIUM 힌트. **CRITICAL 확산 판정**: 내용 확인 노트가 60초 안에 3개 디렉터리 이상, 또는 이름 매칭 노트 3개 디렉터리 + 실제 암호화 활동 동반. 64KB 초과 파일·심볼릭 링크는 제외. |
+| **카나리 파일** (`canary`) | 정렬 시 맨 앞/뒤로 가는 미끼 파일 5종(`!!_DO_NOT_TOUCH_!!.docx` 등)을 감시 폴더마다 배치하고 SHA-256 으로 1.5초 폴링. 변조/삭제 시 **단발로 CRITICAL**. 트립 후 30초간 **교차 부스트**: mass_io 엔트로피 기준 7.5→6.8 완화 + 가중치 1.5배, 협박문 단일 노트도 CRITICAL 로 승격. |
+| **대량 I/O 분석** (`mass_io`) | 변경된 파일의 머리 4KB 를 Shannon 엔트로피(≥7.5) + 매직바이트 10종(PE/PDF/Office/ZIP/JPEG …)으로 검사. 신호: **매직바이트 소실**(HIGH — 알려진 형식이 알 수 없는 바이트로), **고엔트로피 쓰기**(MEDIUM), **랜섬 확장자 rename**(HIGH — `.encrypted`/`.lockbit` 등), 암호화 특징 이벤트가 **10초에 15건+ 모이면 burst**(HIGH). |
+| **프로세스 트리 휴리스틱** (`process_watcher`) | psutil 폴링 기반: LOLBin 부모-자식 체인(Office→PowerShell, 브라우저→스크립트 호스트), **5초 안에 자식 12개+ fan-out**, **2초 안에 50MB+ 디스크 쓰기 burst**, 그리고 **시스템 바이너리 위장 탐지** — `%TEMP%\svchost.exe` 처럼 핵심 시스템 이름을 달고 System32 밖에서 실행되는 사칭(T1036.005)을 즉시 채점. |
+
+### 점수·신뢰 모델 (Scoring & trust)
+
+| 기능 | 설명 |
+|---|---|
+| **윈도우 합산** | 단일 신호로 결론 내지 않고 **120초 윈도우** 안의 가중치를 합산해 INFO→CRITICAL 5등급 판정. 오래된 신호는 자연 감쇠. |
+| **Actor 신뢰 2단계** (`actor_trust`) | 신호를 낸 프로세스의 **디스크 이미지 경로를 검증**해 신뢰를 판정(이름만으론 불가 — `C:\Temp\MsMpEng.exe` 는 탈락). FULL(Defender/서비싱/WMI — 모든 활동 면제) 과 REGISTRY_ONLY(svchost — 레지스트리만 면제, **대량 파일 변조는 여전히 채점**) 를 구분해, svchost 에 숨은 랜섬웨어를 놓치지 않으면서 부팅 직후 OS 하우스키핑이 CRITICAL 을 찍던 인플레를 제거. 경로 조회 실패 시 **불신(fail-closed)**. |
+| **신뢰 게이트 사각지대 차단** | 카나리 변조·매직바이트 소실·랜섬 확장자 변경·협박문 확산·커널 차단 사건 같은 *지상 진실(ground-truth)* 암호화 증거는 **actor 가 신뢰여도 항상 채점** — 신뢰 프로세스가 이런 행위를 하면 그게 곧 인젝션(T1055)/위장(T1036)의 증거이기 때문. |
+| **상관 게이트** | `file_delete` 같은 흔한 정상 행위는 단독으로 0점 — **같은 PID 가 실제 암호화 활동을 보일 때만** 가중. 휴리스틱 신호도 암호화 활동과의 상관으로만 의미를 가짐. |
+| **위협 등급 자동 복구** | responder 가 PID 를 종료하면 그 PID 의 신호를 라이브 점수 윈도우에서 즉시 제거(`forget_pid`) — 모든 활성 위협이 제거되면 대시보드가 **수동 초기화 없이 스스로 "안전"으로 복귀**. 다른 PID(제2의 공격자)의 점수와 영구 감사 기록(SQLite/보고서)은 그대로. |
+
+### 자동 대응 (Active Responder)
+
+| 기능 | 설명 |
+|---|---|
+| **3가지 모드** | `off`(관찰만) / `quarantine`(커널이 파일 I/O 차단) / `kill`(차단 + `TerminateProcess`, 기본값). 대시보드에서 런타임 전환 가능. |
+| **표적 대응 (no score-sweep)** | **PID 를 지목한 HIGH/CRITICAL 신호에만** 반응 — 합산 점수가 높다고 윈도우의 모든 PID 를 쓸어버리지 않습니다. CRITICAL 은 즉시 행동, **HIGH 휴리스틱은 corroboration 요구**(같은 윈도우의 실제 암호화 활동, 또는 제2의 탐지기가 같은 PID 지목). 미충족이면 `observed only` 로 기록만 — 운영자가 대시보드에서 판단. |
+| **부모 에스컬레이션** | 파괴 행위는 보통 일회성 LOLBin(vssadmin/powershell/cmd 등 19종)으로 실행되므로, 그 도구만 죽이면 늦거나 거부됩니다 → **명령을 내린 부모(랜섬웨어 본체)까지 함께 종료**. |
+| **Never-kill 보호 목록** | OS 핵심·브라우저·UI·개발 도구 등 **47개 프로세스는 하드코딩으로 절대 종료 금지**. 그중 핵심 시스템 바이너리 19종은 **경로 검증** — System32 밖에서 그 이름을 사칭하면 면제권 박탈. |
+| **행동 시점 포렌식 캡처** | 종료 직전에 이미지 경로·소유 계정·부모 PID/이름·트리거 신호·당시 점수/등급을 캡처(죽고 나면 못 얻음). 이미지 SHA-256 은 **격리/종료가 끝난 뒤** 계산해 차단 지연 0. |
+
+### 보고·포렌식 (Reporting & forensics)
+
+| 기능 | 설명 |
+|---|---|
+| **SQLite 이벤트 스토어** | 모든 신호를 `detector.db` 에 영속화(타임스탬프·탐지기·가중치·당시 점수/등급). INFO 신호는 DB 에만 기록하고 콘솔은 생략(노이즈 차단). |
+| **한글 인시던트 보고서** | 대응 액션마다 **비전문가용 한글 마크다운 보고서** 자동 생성 — 무슨 프로그램이 무슨 행동을 해서 무엇을 했는지 풀어 설명, 명령줄 해설, ATT&CK 기법, 피해 범위 집계 포함. 동일 상태는 60초 윈도우로 dedup. |
+| **통합(campaign) 보고서** | 마지막 인시던트로부터 **120초 안에 이어지는 사건들을 하나의 공격으로 묶어** 통합 보고서 생성 — 다중 PID 공격이 보고서 수십 장으로 흩어지지 않음. 점수 윈도우가 비면 자동 확정. |
+| **디스크 실측 피해 검증** | 보고서의 피해 집계를 신호 메타데이터로만 추정하지 않고 **실제 디스크에서 확인**(`verify_damage_on_disk`). 별도 도구 `scan_damage.py` 는 **디코이 없이도** 의심 확장자·매직바이트로 감시 트리의 피해를 사후 스캔. |
+| **Postmortem 도구** | `postmortem.py` 가 디스크 영속 데이터(DB+보고서+디코이)만 읽어 타임라인·탐지→대응 지연·디코이 생존율을 집계 — **에이전트가 BSOD 로 죽었어도 동작**. |
+| **데스크톱 알림** | 프로세스 종료 시 토스트 알림(30초당 최대 3개로 폭주 방지). |
+
+### 운영·기업 기능 (Operations & enterprise)
+
+| 기능 | 설명 |
+|---|---|
+| **운영자 허용 목록** | 정상 백업/동기화/압축 앱(Veeam, Acronis, 7-Zip 등)을 프로세스 이름 또는 경로 접두사로 등록해서 **오탐 방지**. 카나리/협박문 확산처럼 높은 신뢰도 신호는 여전히 탐지. 대시보드에서 편집 가능. |
 | **MITRE ATT&CK 기법 태깅** | 모든 신호가 표준 ATT&CK 기법(T1486, T1490, T1055, T1218 등)으로 매핑. 보고서와 대시보드에 표기해서 SOC/IR 팀의 위협 인텔 연계 간편화. |
-| **SIEM / Webhook 통합** *(기업)* | HIGH 이상 이벤트를 **CEF over syslog**(Splunk/QRadar/ArcSight/Sentinel) 와 **범용 JSON Webhook**(Slack/Teams/PagerDuty/SOAR)으로 비동기 전송. 외부 의존성 0, fail-open(통합 장애가 탐지를 멈추지 않음). |
-| **대시보드 인증** *(기업)* | 토큰이 설정되면 상태 변경/관리자 엔드포인트(`/api/reset`, `/api/kill`, `/api/admin/*`)는 `X-API-Key` 또는 `Authorization: Bearer` 를 요구. watchdog 용 `/api/heartbeat` 는 항상 공개. |
-| **중앙 설정 파일** *(기업)* | `ransomguard.toml`/`.json` 로 정책(감시 경로·모드·통합·인증)을 일괄 배포(GPO/Intune/Ansible). 비밀(토큰/Webhook URL)은 환경변수 우선. |
-| **관리자 대시보드 패널** | Flask UI 내 "관리자 패널" — 시스템 상태(드라이버, 감시 폴더, 허용 목록, 통합/인증 상태), 모드 전환, PID 별 위협 분석(ATT&CK 기법 표시), 허용 목록 편집. |
-| **Flask 대시보드** | `http://127.0.0.1:5000` — 실시간 점수, 최근 이벤트, 프로세스 목록, 자동 대응 로그, 수동 kill/release 버튼. |
+| **SIEM / Webhook 통합** | HIGH 이상 이벤트를 **CEF over syslog**(Splunk/QRadar/ArcSight/Sentinel) 와 **범용 JSON Webhook**(Slack/Teams/PagerDuty/SOAR)으로 비동기 전송. 외부 의존성 0, fail-open(통합 장애가 탐지를 멈추지 않음). |
+| **대시보드 인증** | 토큰이 설정되면 상태 변경/관리자 엔드포인트(`/api/reset`, `/api/kill`, `/api/admin/*`)는 `X-API-Key` 또는 `Authorization: Bearer` 를 요구(상수시간 비교). watchdog 용 `/api/heartbeat` 는 항상 공개. `auth_required_for_reads` 로 읽기 API 까지 보호 가능. |
+| **중앙 설정 파일** | `ransomguard.toml`/`.json` 로 정책(감시 경로·모드·통합·인증)을 일괄 배포(GPO/Intune/Ansible). 비밀(토큰/Webhook URL)은 환경변수 우선. |
+
+### Flask 대시보드
+
+`http://127.0.0.1:5000` — 한 화면에서 관제·대응·보고까지:
+
+- **상태 히어로 배너**: 현재 위협 등급을 이모지+설명으로 즉시 표시, 차단/신호 카운터
+- **실시간 점수 게이지 + 추이 스파크라인** (120초 윈도우와 동기)
+- **이벤트 피드**: severity·탐지기 필터, 검색, 일시정지
+- **인시던트 보고서 패널**: 보고서 목록 + **모달 뷰어(마크다운 렌더링) + PDF 저장**
+- **대응 조치 감사 로그**: 트리거 신호·SHA-256/VT 링크·부모 프로세스·탐지→대응 지연
+- **MITRE ATT&CK 기법 요약**, 프로세스 테이블(필터·위협 PID 하이라이트), 수동 kill/release
+- **관리자 패널**: 시스템 상태 그리드(드라이버·감시 폴더·통합/인증 상태), 모드 전환, PID 별 위협 분석(ATT&CK 표시), 허용 목록 편집
+- 다크(SOC)/라이트 테마 토글, 헤더 🔑 버튼으로 운영자 토큰(X-API-Key) 입력
 
 ---
 
@@ -49,6 +104,10 @@ Windows 11용 **랜섬웨어 전용 소형 EDR** 입니다.
 | 150+ | CRITICAL | 즉시 대응 |
 
 오래된 신호는 2분 뒤 자동으로 사라져서 "옛날 일 때문에 계속 경보 울리는" 일이 없어요.
+또한 합산 전에 세 가지 게이트를 거칩니다 — **신뢰 actor 면제**(검증된 시스템
+컴포넌트의 정상 활동은 0점), **상관 게이트**(`file_delete` 는 같은 PID 의 암호화
+활동이 있을 때만 가중), **kill 후 자동 복구**(종료된 PID 의 신호는 윈도우에서
+즉시 제거). 자세한 동작은 위 "점수·신뢰 모델" 표 참고.
 
 ---
 
@@ -398,13 +457,26 @@ RansomGuard 는 여러 계층에서 오탐을 줄이도록 설계했습니다:
 
 - **고엔트로피 데이터의 정상 포맷 제외**: `.zip`, `.rar`, `.7z`, `.jpg`, `.mp3`, `.mp4`, `.avi` 등
   **natively high-entropy 파일**은 정적 엔트로피 신호에서 제외됩니다. 정상적인 사진 편집,
-  비디오 트랜스코딩, 아카이브 업데이트로 인한 오탐 감소.
-- **협박문 다중 디렉터리 확산 요구**: 단일 README.txt 는 HIGH, **2개 폴더 이상 60초 안에**
-  퍼져야 CRITICAL 판정 → 합법적 단일 문서 보호.
+  비디오 트랜스코딩, 아카이브 업데이트로 인한 오탐 감소. (이들이 실제로 암호화되면
+  매직바이트 소실·확장자 변경 같은 *변화* 신호로 잡힙니다.)
+- **노이즈 경로/확장자 제외**: 브라우저 캐시, 패키지 앱 캐시, `\Temp\`, `.tmp`/`.log`/`.etl`
+  등 정상 프로그램이 끊임없이 쓰고 지우는 경로·확장자는 암호화 신호로 치지 않음.
+- **협박문 판정 보수화**: 이름만 매칭된 단일 노트는 MEDIUM 힌트, 내용(암호화폐 주소·`.onion`
+  등 강 지표 필수)으로 확인돼야 HIGH. CRITICAL 확산은 **60초 안에 3개 디렉터리 이상**
+  + 내용 확인(또는 실제 암호화 활동 동반) 요구 → 정상 프로젝트의 `readme.txt` 두 개로
+  최고 등급이 뜨던 v1 오탐 제거.
 - **운영자 허용 목록**: 백업/압축/동기화 소프트웨어를 프로세스 **이름** 또는 **경로 접두사**로 명시 등록.
   경로 기반 등록은 이름 위장(`%TEMP%\veeamagent.exe` 같은 가짜) 방어.
   **단, canary 트립/협박문 확산 같은 고신뢰 단발 신호는 허용 목록으로도 면제 안 됨.**
-- **신뢰 기반 점수 면제**: 시스템 정상 프로세스(Defender, WMI, servicing)는 점수 가산 제외.
+- **신뢰 기반 점수 면제 (2단계)**: 검증된 이미지 경로의 시스템 프로세스(Defender, WMI,
+  servicing)는 점수 가산 제외. svchost 는 레지스트리/하우스키핑만 면제되고 대량 파일
+  변조는 여전히 채점 — 인젝션된 svchost 랜섬웨어 대비.
+- **상관 게이트**: 단일 파일 삭제(`file_delete`) 같은 흔한 정상 행위는 같은 PID 의 실제
+  암호화 활동이 동반될 때만 점수에 기여.
+- **레지스트리 정상 값 필터**: ctfmon 의 `internat.exe` Run 키 갱신, Defender 자체
+  텔레메트리 타임스탬프 등 라이브 런에서 관측된 정상 쓰기는 값 이름 단위로 제외.
+- **Corroboration 없는 HIGH 는 기록만**: responder 는 단독 HIGH 휴리스틱에 행동하지 않고
+  `observed only` 로 남깁니다 — 제2의 탐지기나 실제 암호화 활동이 확인될 때만 종료.
 
 ## 안전 안내 (Safety)
 

@@ -284,3 +284,132 @@ class TestModuleHelpers:
         headline = incident_report._damage_headline(damage)
         assert isinstance(headline, str)
         assert "1" in headline
+
+
+# ---------------------------------------------------------------------------
+# 행동 시점 컨텍스트 — RustyStealer PDF 자기모순 회귀 테스트
+# (엔진 윈도우에서 신호가 퇴거된 뒤에도 보고서는 차단 근거를 보여야 한다)
+# ---------------------------------------------------------------------------
+
+import json as _json
+import time as _time
+
+from scoring import ScoringEngine
+from responder import KillAction
+from incident_report import IncidentReporter, _damage_floors, _damage_headline
+
+
+def _evicted_action(ts=None):
+    ts = ts or _time.time()
+    trig = Signal(
+        detector="minifilter", name="kernel_rename_burst", weight=40,
+        severity=Severity.HIGH,
+        message="pid=10652 performed 12 renames in 10s",
+        metadata={"pid": 10652, "count": 12,
+                  "last_path": r"C:\u\doc.txt.locked"},
+        timestamp=ts - 130,  # 점수 윈도우(120초) 밖
+    )
+    return KillAction(
+        timestamp=ts, pid=10652, process_name="mal.exe",
+        cmdline=r"C:\sample\mal.exe",
+        reason="minifilter/kernel_rename_burst", mode="kill",
+        quarantined=True, terminated=True,
+        exe_path=r"C:\sample\mal.exe", exe_sha256="ab" * 32,
+        username="HOST\\victim", ppid=4321, parent_name="explorer.exe",
+        score_at_action=40, level_at_action="LOW",
+        trigger_signal=trig.to_dict(), detect_ts=trig.timestamp,
+    )
+
+
+class TestActionTimeReport:
+    def _build(self, tmp_path):
+        engine = ScoringEngine()  # 비어 있음 = 신호 전부 퇴거된 상황
+        rep = IncidentReporter(engine, reports_dir=str(tmp_path), notify=False)
+        try:
+            action = _evicted_action()
+            md = rep._build_markdown(action)
+            return rep, action, md
+        finally:
+            rep.close()
+
+    def test_trigger_signal_survives_eviction(self, tmp_path):
+        _, _, md = self._build(tmp_path)
+        assert "kernel_rename_burst" in md
+        assert "이 프로세스(PID 10652)에 대한 탐지 신호" in md
+
+    def test_score_and_level_from_action_time(self, tmp_path):
+        _, _, md = self._build(tmp_path)
+        assert "차단 시점 위험 점수(최근 120초 누적):** 40" in md
+        assert "(LOW)" in md
+
+    def test_block_basis_explains_single_signal_kill(self, tmp_path):
+        _, _, md = self._build(tmp_path)
+        assert "즉시 차단" in md
+
+    def test_forensics_fields_rendered(self, tmp_path):
+        _, _, md = self._build(tmp_path)
+        assert "ab" * 32 in md            # sha256
+        assert "explorer.exe" in md       # 부모
+        assert "HOST\\victim" in md       # 계정
+        assert "탐지→대응 지연" in md
+
+    def test_ioc_block_present(self, tmp_path):
+        _, _, md = self._build(tmp_path)
+        assert "침해 지표 (IOC)" in md
+        assert f"sha256: {'ab' * 32}" in md
+        assert "mitre_attack: T1486" in md
+
+    def test_damage_floor_uses_burst_count(self, tmp_path):
+        _, _, md = self._build(tmp_path)
+        assert "최소 12개" in md
+
+    def test_json_sidecar_written_with_schema(self, tmp_path):
+        engine = ScoringEngine()
+        rep = IncidentReporter(engine, reports_dir=str(tmp_path), notify=False)
+        try:
+            rep.on_action(_evicted_action())
+        finally:
+            rep.close()
+        sidecars = list(tmp_path.glob("incident_*.json"))
+        assert len(sidecars) == 1
+        doc = _json.loads(sidecars[0].read_text(encoding="utf-8"))
+        assert doc["schema"] == "ransomguard.incident.v1"
+        assert doc["action"]["exe_sha256"] == "ab" * 32
+        assert doc["damage"]["max_rename_burst"] == 12
+        assert [t["id"] for t in doc["attack"]] == ["T1486"]
+        assert doc["pid_signals"][0]["name"] == "kernel_rename_burst"
+
+    def test_signal_table_has_pid_column_and_marker(self, tmp_path):
+        _, _, md = self._build(tmp_path)
+        assert "| 시각 | PID |" in md
+        assert "**10652** ◀" in md
+
+    def test_legacy_action_without_context_still_renders(self, tmp_path):
+        """구버전 KillAction(컨텍스트 없음)도 보고서 생성이 가능해야 한다."""
+        engine = ScoringEngine()
+        rep = IncidentReporter(engine, reports_dir=str(tmp_path), notify=False)
+        try:
+            a = KillAction(_time.time(), 1, "x.exe", "x", "minifilter/file_delete",
+                           "kill", quarantined=True, terminated=True)
+            md = rep._build_markdown(a)
+        finally:
+            rep.close()
+        assert "보고서 생성 시점 위험 점수" in md
+
+
+class TestDamageFloors:
+    def test_floor_when_burst_exceeds_paths(self):
+        d = summarize_damage([_sig("kernel_rename_burst",
+                                   metadata={"count": 12,
+                                             "last_path": r"C:\a.locked"})])
+        enc_min, ren_min = _damage_floors(d)
+        assert ren_min == 12
+        assert "최소 12개" in _damage_headline(d)
+
+    def test_no_floor_when_paths_dominate(self):
+        sigs = [_sig("suspicious_extension", metadata={"dest": f"C:\\f{i}.enc"})
+                for i in range(3)]
+        d = summarize_damage(sigs)
+        _, ren_min = _damage_floors(d)
+        assert ren_min == 3
+        assert "최소" not in _damage_headline(d)

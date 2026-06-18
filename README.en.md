@@ -13,23 +13,78 @@ process the moment it crosses a threshold.
 
 ## Features
 
-| Category | Description |
+Detection is handled by **one kernel driver + eight user-mode detectors**, all
+feeding a single scoring engine (120-second sliding window). When the evidence
+crosses the threshold, the responder quarantines/kills the process and the
+incident is written up automatically as a readable report.
+
+### Detection
+
+| Detector | What it does, concretely |
 |---|---|
-| **Kernel minifilter** | `minifilter/RansomGuard.sys` intercepts `IRP_MJ_CREATE`, `IRP_MJ_WRITE`, and `IRP_MJ_SET_INFORMATION` on every volume; streams `(pid, path, op, bytes)` events to user mode over a filter communication port; and can block subsequent writes/renames from a quarantined PID inside the kernel. |
-| **Per-PID burst detection** | The bridge accumulates write bytes and rename counts per PID; large bursts inside a short window produce HIGH-severity signals independent of which directory the writes hit. |
-| **Ransom note detector (content-aware)** | Detects ransom notes by **filename pattern** (HOW_TO_DECRYPT.txt, _readme.txt, *.hta, etc.) **and by file content** — crypto wallet addresses (BTC/ETH/Monero), `.onion` URLs, "your files have been encrypted" extortion phrases, and payment/contact terms. **Notes with arbitrary/random filenames (e.g., `A7F3C.txt`) are therefore caught by content.** A single content-confirmed note triggers HIGH; name-only single note = MEDIUM hint only. **CRITICAL fires when content-confirmed notes spread across ≥ 3 directories, OR name-matched notes spread across ≥ 3 dirs with corroborating real encryption activity** (canary / mass_io) — name-only spread alone no longer auto-escalates to avoid false positives. |
-| **Canary files** | High-confidence trip-wire deployed in every watch directory; any modification or deletion yields a standalone CRITICAL signal. |
-| **Process command-line rules (33 rules)** | VSS shadow-copy deletion/resize, BCD tampering, Defender disablement, log wiping, BitLocker disable, PowerShell obfuscation — plus living-off-the-land rules that abuse built-in/signed tools as encryption engines: `cipher /e` (EFS), BitLocker forced encryption (`manage-bde -on` / `Enable-BitLocker`), LOLBin proxy execution (`certutil` / `bitsadmin` / `esentutl` / `wmic process call create`), BYOVD (`sc create type=kernel`), double-extortion staging (`7z -p` / `rclone`). |
-| **Ransomware via legitimate processes** | Closes the trust-gate blind spot: ① **Ground-truth encryption bypass** — if a trusted process (svchost, explorer, etc.) injected (T1055) or masqueraded (T1036) by ransomware produces canary trips, magic-byte loss, or suspicious extension renames, the trust exemption is **ignored and scoring always proceeds**. ② **System-binary masquerade detection** — `process_masquerade` (HIGH, T1036.005) fires when a core system binary name (svchost.exe, lsass.exe, etc.) runs from outside System32/SysWOW64 (e.g., `%TEMP%\svchost.exe`). |
-| **Process tree heuristics** | LOLBin parent/child chains (Office → PowerShell, browser → script host), child fan-out from one parent, user-mode disk-write bursts from psutil. |
-| **Active responder** | Three modes: `off`, `quarantine`, `kill`. In `kill` mode, any HIGH/CRITICAL signal carrying a PID immediately triggers a kernel quarantine and a `TerminateProcess`. Critical system processes (lsass, csrss, etc.) are on a hard-coded never-kill list. |
-| **Operator allowlist** | Register trusted third-party apps (Veeam, Acronis, 7-Zip, etc.) by process name or image path prefix to prevent false-positive kills. High-confidence signals (canary, ransom-note spread) bypass the allowlist to prevent abuse. |
+| **Kernel minifilter** (`minifilter/RansomGuard.sys`) | Intercepts `IRP_MJ_CREATE`, `IRP_MJ_WRITE`, and `IRP_MJ_SET_INFORMATION` on every volume and streams `(pid, path, op, bytes)` events to user mode over a filter communication port. Also forwards **process create/exit** (`PsSetCreateProcessNotifyRoutineEx`) and **registry writes** (`CmRegisterCallbackEx`) on the same channel. Writes/renames from a quarantined PID are **rejected pre-op, inside the kernel**. |
+| **Per-PID burst detection** (`minifilter_bridge`) | Accumulates kernel events per PID — **75 MB+ written within 4 s** or **20+ renames within 5 s** raises HIGH (`kernel_write_burst` / `kernel_rename_burst`). Keyed on the **process**, not the path, so encryption outside the watch dirs is still caught. |
+| **Kernel process watch** (`process_kernel`) | Applies the 33 command-line rules at process-creation time — via the kernel callback, **before the new process runs a single instruction** and without WMI. The command line comes from kernel memory, so **PEB tampering can't hide it**, and short-lived processes that WMI (50–500 ms latency, lossy under load) used to miss are now visible. |
+| **Kernel registry watch** (`registry_kernel`) | Scores writes/deletes against high-value keys: Defender services (`WinDefend`/`WdFilter`/`Sense`), Defender settings/policy keys, SafeBoot, Run/RunOnce persistence, System policy (UAC/SmartScreen), and **RansomGuard's own service key** (driver-unload attempts = self-protection). Known-benign writes (ctfmon's `internat.exe`, Defender's own telemetry timestamps) are excluded per value name. |
+| **Process command-line rules (33)** (`process_cmdline`) | Regex-checks every new process's command line from both WMI and kernel sources. VSS shadow-copy deletion/resize, BCD tampering, Defender/SmartScreen disablement, event-log & USN-journal wiping, firewall-off, BitLocker disable — plus living-off-the-land rules that abuse built-in/signed tools as encryption engines: `cipher /e` (EFS), forced BitLocker encryption (`manage-bde -on` / `Enable-BitLocker`), LOLBin proxy execution (`certutil` / `bitsadmin` / `esentutl` / `wmic process call create`), BYOVD (`sc create type=kernel`), double-extortion staging (`7z -p` / `rclone`), and obfuscated PowerShell (encoded commands, in-memory downloaders, policy bypass). |
+| **Ransom note detector (content-aware)** (`ransom_note`) | 12 filename patterns (`HOW_TO_DECRYPT*`, `_readme.txt`, …) **plus content analysis**: crypto wallet addresses (BTC/ETH/XMR) and `.onion` URLs are *strong* indicators; extortion phrases, decryption instructions, payment terms, contact channels, and threat language are *weak* ones. Confirmation requires **≥ 1 strong indicator and a total score ≥ 3** — so **randomly named notes (`A7F3C.txt`) are caught by content**. Single content-confirmed note = HIGH; name-only match = MEDIUM hint. **CRITICAL spread**: content-confirmed notes in ≥ 3 directories within 60 s, or name-matched notes in ≥ 3 dirs with corroborating real encryption activity. Files over 64 KB and symlinks are excluded. |
+| **Canary files** (`canary`) | Five decoy files named to sort first/last (`!!_DO_NOT_TOUCH_!!.docx`, …) deployed in every watch directory, SHA-256-polled every 1.5 s. Any modification/deletion = **standalone CRITICAL**. For 30 s after a trip, a **cross-detector boost** lowers the mass_io entropy bar 7.5→6.8, multiplies weights ×1.5, and escalates a single ransom note to CRITICAL. |
+| **Mass I/O analysis** (`mass_io`) | Samples the first 4 KB of changed files: Shannon entropy (≥ 7.5) + 10 magic-byte signatures (PE/PDF/Office/ZIP/JPEG …). Signals: **magic bytes lost** (HIGH — known format became unrecognizable), **high-entropy write** (MEDIUM), **ransom-extension rename** (HIGH — `.encrypted`/`.lockbit`/…), and a **burst** when 15+ encryption-pattern events land within 10 s (HIGH). |
+| **Process tree heuristics** (`process_watcher`) | psutil-based: LOLBin parent/child chains (Office → PowerShell, browser → script host), **fan-out of 12+ children within 5 s**, **50 MB+ disk-write burst within 2 s**, and **system-binary masquerade detection** — a core system name (svchost.exe, lsass.exe, …) running from outside System32/SysWOW64 (e.g. `%TEMP%\svchost.exe`, T1036.005) scores immediately. |
+
+### Scoring & trust model
+
+| Feature | Description |
+|---|---|
+| **Windowed accumulation** | No single signal decides anything: weights are summed over a **120-second window** into five levels (INFO→CRITICAL); old signals age out naturally. |
+| **Two-tier actor trust** (`actor_trust`) | Trust is decided by the **verified on-disk image path**, never the bare name (`C:\Temp\MsMpEng.exe` fails). FULL trust (Defender, servicing, WMI — all activity exempt) is distinct from REGISTRY_ONLY trust (svchost — registry/housekeeping exempt, **bulk file mutation still scored**), so svchost-hosted ransomware is caught while boot-time OS housekeeping no longer inflates an idle machine to CRITICAL. Unresolvable paths **fail closed** (untrusted). |
+| **Trust-gate blind-spot closure** | *Ground-truth* encryption evidence — canary trips, magic-byte loss, ransom-extension renames, note spread, kernel-blocked writes — is **always scored even from a trusted actor**: a genuine system component never does these, so they are evidence of injection (T1055) or masquerade (T1036). |
+| **Correlation gating** | Common benign behavior like `file_delete` contributes zero on its own — it is weighted **only when the same PID also shows real encryption activity**. |
+| **Threat-level auto-recovery** | When the responder terminates a PID, its signals are purged from the live scoring window (`forget_pid`) — once all active attackers are gone the dashboard **returns to "safe" on its own**, no operator reset needed. Other PIDs' scores and the permanent audit trail (SQLite, reports) are untouched. |
+
+### Active responder
+
+| Feature | Description |
+|---|---|
+| **Three modes** | `off` (observe), `quarantine` (kernel blocks file I/O), `kill` (block + `TerminateProcess`, the default). Switchable at runtime from the dashboard. |
+| **Targeted response (no score-sweep)** | Reacts **only to HIGH/CRITICAL signals that name a PID** — a high aggregate score never sweeps every PID in the window. CRITICAL acts immediately; **a HIGH heuristic needs corroboration** (real encryption activity in the window, or a second distinct detector naming the same PID). Otherwise it is recorded as `observed only` for the operator to judge. |
+| **Parent escalation** | Destruction usually runs through transient LOLBins (vssadmin, powershell, cmd — 19 names); killing the tool is too late or refused, so **the parent that issued the command — the actual malware body — is terminated too**. |
+| **Never-kill safeguard** | **47 hard-coded processes** (OS core, browsers, shell/UI, dev tools) are never terminated. 19 core system binaries among them are **path-verified**: an impostor carrying the name from outside System32 loses the immunity. |
+| **At-action forensic capture** | Image path, owning user, parent PID/name, trigger signal, and score/level are captured at kill time (unavailable once the process is gone). The image SHA-256 is computed **after** quarantine/termination so hashing never delays the block. |
+
+### Reporting & forensics
+
+| Feature | Description |
+|---|---|
+| **SQLite event store** | Every signal persisted to `detector.db` (timestamp, detector, weight, score/level after). INFO signals go to the DB only, keeping the console quiet. |
+| **Plain-language incident reports** | Each response action generates a **non-expert-readable Korean markdown report**: what program did what, an explanation of its command line, ATT&CK techniques, and a damage summary. Identical states are deduped within a 60 s window. |
+| **Campaign (consolidated) reports** | Incidents arriving within **120 s of the last one are merged into a single attack campaign report** — a multi-PID attack no longer scatters into dozens of files. Finalized automatically once the scoring window drains. |
+| **On-disk damage verification** | Report damage counts are verified **against the actual disk** (`verify_damage_on_disk`), not just inferred from signal metadata. A standalone tool, `scan_damage.py`, post-scans the watch tree by suspicious extensions/magic bytes — **no decoys required**. |
+| **Postmortem tool** | `postmortem.py` reads only disk-persisted data (DB + reports + decoys) to compute the timeline, detect→respond latency, and decoy survival — **works even after a BSOD killed the agent**. |
+| **Desktop notifications** | Toast on every termination, capped at 3 per 30 s. |
+
+### Operations & enterprise
+
+| Feature | Description |
+|---|---|
+| **Operator allowlist** | Register trusted third-party apps (Veeam, Acronis, 7-Zip, etc.) by process name or image-path prefix to prevent false-positive kills. High-confidence signals (canary, ransom-note spread) bypass the allowlist to prevent abuse. Editable from the dashboard. |
 | **MITRE ATT&CK technique tagging** | Every signal maps to standard ATT&CK technique IDs (T1486, T1490, T1055, T1218, etc.). Appears in incident reports and the admin dashboard for SOC/IR integration. |
-| **SIEM / Webhook integration** *(enterprise)* | HIGH+ events forwarded asynchronously via **CEF over syslog** (Splunk/QRadar/ArcSight/Sentinel) and a **generic JSON webhook** (Slack/Teams/PagerDuty/SOAR). Zero external dependencies; fail-open (an integration failure never stops detection). |
-| **Dashboard authentication** *(enterprise)* | When a token is configured, mutating and admin endpoints (`/api/reset`, `/api/kill`, `/api/admin/*`) require `X-API-Key` or `Authorization: Bearer`. The watchdog `/api/heartbeat` is always open. |
-| **Central config file** *(enterprise)* | `ransomguard.toml` / `.json` for deploying policy (watch paths, mode, integrations, auth) to fleets via GPO/Intune/Ansible. Secrets (token, webhook URL) are injected via environment variables which always win over the file. |
-| **Administrator dashboard panel** | Collapsible "Administrator" section with system health (driver, watch dirs, allowlist, integration/auth status), mode switcher, per-PID threat breakdown (ATT&CK tags), and allowlist editor. |
-| **Flask dashboard** | `http://127.0.0.1:5000` — live score, recent events, process table, responder log, manual kill/release. |
+| **SIEM / Webhook integration** | HIGH+ events forwarded asynchronously via **CEF over syslog** (Splunk/QRadar/ArcSight/Sentinel) and a **generic JSON webhook** (Slack/Teams/PagerDuty/SOAR). Zero external dependencies; fail-open (an integration failure never stops detection). |
+| **Dashboard authentication** | When a token is configured, mutating and admin endpoints (`/api/reset`, `/api/kill`, `/api/admin/*`) require `X-API-Key` or `Authorization: Bearer` (constant-time compare). The watchdog `/api/heartbeat` is always open; `auth_required_for_reads` extends protection to read APIs. |
+| **Central config file** | `ransomguard.toml` / `.json` for deploying policy (watch paths, mode, integrations, auth) to fleets via GPO/Intune/Ansible. Secrets (token, webhook URL) are injected via environment variables which always win over the file. |
+
+### Flask dashboard
+
+`http://127.0.0.1:5000` — monitoring, response, and reporting in one page:
+
+- **Status hero banner** showing the current threat level at a glance, with blocked/signal counters
+- **Live score gauge + history sparkline** (synced to the 120 s window)
+- **Event feed** with severity/detector filters, search, and pause
+- **Incident report panel**: report list + **modal viewer (rendered markdown) + PDF export**
+- **Response-action audit log**: trigger signal, SHA-256 + VirusTotal link, parent process, detect→respond latency
+- **MITRE ATT&CK summary**, process table (filter, threat-PID highlighting), manual kill/release
+- **Administrator panel**: health grid (driver, watch dirs, integration/auth status), mode switcher, per-PID threat breakdown with ATT&CK tags, allowlist editor
+- Dark (SOC) / light theme toggle; operator token (X-API-Key) entry via the 🔑 header button
 
 ## Scoring
 
@@ -46,7 +101,11 @@ when reading postmortem / dashboard output.)
 | 150+    | CRITICAL | respond now       |
 
 Old signals age out after two minutes, so a past event won't keep the
-alarm ringing.
+alarm ringing. Three gates apply before summation — **trusted-actor
+exemption** (verified system components score zero for normal activity),
+**correlation gating** (`file_delete` only counts alongside encryption
+activity from the same PID), and **post-kill auto-recovery** (a terminated
+PID's signals are purged from the window). See "Scoring & trust model" above.
 
 ## Requirements
 
@@ -368,19 +427,35 @@ RansomGuard is designed to reduce false positives on multiple layers:
 - **Native high-entropy format exclusion:** `.zip`, `.rar`, `.7z`, `.jpg`,
   `.mp3`, `.mp4`, `.avi` and other natively high-entropy files are excluded
   from static entropy signals. Reduces false positives from normal photo
-  editing, video transcoding, and archive updates.
-- **Ransom note multi-directory spread requirement:** A single content-confirmed
-  note triggers HIGH; a name-only match is a MEDIUM hint only. CRITICAL requires
-  content-confirmed notes across **3+ directories**, or name-matched notes across
-  3+ dirs with corroborating real encryption activity. Name-only spread alone no
-  longer auto-escalates to CRITICAL. Protects legitimate single documents.
+  editing, video transcoding, and archive updates. (If they actually get
+  encrypted, *change*-based signals — magic-byte loss, extension rename —
+  still catch it.)
+- **Noise path/extension exclusion:** Browser caches, packaged-app caches,
+  `\Temp\`, and churn extensions (`.tmp`/`.log`/`.etl`/…) that normal
+  software writes constantly never count as encryption events.
+- **Conservative ransom-note verdicts:** A name-only match is a MEDIUM hint;
+  HIGH requires content confirmation (a strong indicator — crypto wallet or
+  `.onion` address — is mandatory). CRITICAL requires spread across **3+
+  directories within 60 s** with content confirmation or corroborating real
+  encryption activity — two legitimate `readme.txt` files can no longer
+  escalate to the top level.
 - **Operator allowlist:** Whitelist backup/compression/sync software by
   process **name** or **image path prefix**. Path-based entries defeat
   name spoofing (`%TEMP%\veeamagent.exe` won't match a path entry).
   **However, high-confidence single-shot signals (canary, ransom note
   spread) bypass the allowlist to prevent abuse.**
-- **Trust-based score exemption:** System processes (Defender, WMI,
-  servicing) are excluded from scoring.
+- **Two-tier trust-based score exemption:** System processes with verified
+  image paths (Defender, WMI, servicing) are excluded from scoring; svchost
+  is exempt only for registry/housekeeping — its bulk file mutation is still
+  scored, guarding against injected svchost-hosted ransomware.
+- **Correlation gating:** Common benign behavior (a lone `file_delete`)
+  contributes only when the same PID also shows real encryption activity.
+- **Benign registry value filter:** Known-good writes observed in live runs
+  (ctfmon's `internat.exe` Run-key refresh, Defender's own telemetry
+  timestamps) are excluded per value name.
+- **Uncorroborated HIGH = record only:** The responder does not act on a
+  lone HIGH heuristic — it is logged as `observed only` and a kill happens
+  only with a second detector or real encryption activity.
 
 ## Safety
 

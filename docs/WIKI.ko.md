@@ -172,8 +172,13 @@ weight, severity, message, metadata, score_after, level_after)` +
 |-----|------|
 | `class ResponderMode(str, Enum)` | `OFF, QUARANTINE, KILL`. |
 | `NEVER_KILL = {…}` | 절대 죽이지 않는 목록 — OS 핵심 + `python.exe`/`py.exe`/`pythonw.exe`. |
+<<<<<<< HEAD
+| `@dataclass KillAction` | `timestamp, pid, process_name, cmdline, reason, mode, quarantined, terminated, error` + **행동 시점 포렌식 캡처** `exe_path, exe_sha256, username, ppid, parent_name, score_at_action, level_at_action, trigger_signal, detect_ts` (모두 기본값 보유 — 보고서가 라이브 엔진 대신 이 캡처를 1차 근거로 사용). |
+| `ProcessResponder(engine, *, mode, minifilter, critical_threshold, on_action)` | `on_action` 으로 `IncidentReporter` 가 연결된다. |
+=======
 | `@dataclass KillAction` | `timestamp, pid, process_name, cmdline, reason, mode, quarantined, terminated, error`. |
 | `ProcessResponder(engine, *, mode, minifilter, on_action, allowlist)` | `on_action` 으로 `IncidentReporter` 가, `allowlist` 로 운영자 허용목록(never-kill 보강)이 연결된다. |
+>>>>>>> master
 | `attach()` | 엔진 구독. 멱등. |
 | `actions(limit=50)` | 대시보드용 이력. |
 | `manual_kill(pid, reason)` / `manual_release(pid)` | 대시보드 버튼이 도달하는 곳. |
@@ -197,10 +202,12 @@ Windows 종료 전략: 먼저 `psutil.kill()`, 그래도 안 끝나면 ctypes �
 |-----|------|
 | `@dataclass IncidentRecord` | 인덱스 엔트리 (`timestamp, pid, process_name, reason, terminated, quarantined, filename, path`). |
 | `IncidentReporter(engine, *, reports_dir="reports", notify=True)` | 생성 시 리포트 디렉터리를 만든다. |
-| `on_action(action)` | **No-op 은 스킵** (`terminated`/`quarantined` 모두 false). 마크다운 생성 → 파일 저장 → 이력 append → 알림 스레드 spawn. |
+| `on_action(action)` | **No-op 은 스킵** (`terminated`/`quarantined` 모두 false). 마크다운 생성 → 파일 저장 → **JSON 사이드카 저장** → 이력 append → 알림 스레드 spawn. |
 | `recent(limit=50)` | 최신순 `IncidentRecord` dict 리스트. |
 | `read_report(filename)` | 경로 트래버설 방어 (`/`, `\`, `..`, reports_dir 탈출 거부). 파일 본문 또는 `None`. |
-| `_build_markdown(action)` | 프로세스 헤더 → 응답 → 위협 컨텍스트 → 해당 PID 기여 시그널 → 최근 윈도우 → 원본 액션 JSON. |
+| `_incident_context(action)` | **행동 시점 캡처 우선** 컨텍스트: `KillAction.trigger_signal/score_at_action` 을 1차 근거로 쓰고, 트리거 신호는 점수 윈도우(120초)에서 퇴거됐어도 PID 신호 표에 재주입. 라이브 엔진 재조회로 인한 "차단했는데 점수 0/근거 없음" 자기모순 방지 (RustyStealer PDF 사례). md/JSON 양쪽이 같은 헬퍼를 사용. |
+| `_build_markdown(action)` | 한눈에 보기 → 프로그램/조치 → 위협 수준(**차단 시점 점수 + 차단 근거** 명시) → MITRE → 피해 범위(**커널 burst 카운터를 최소 건수 바닥으로** — `_damage_floors`) → 포렌식 정보(이미지 경로/SHA-256/계정/부모/탐지→대응 지연) → 침해 지표(IOC) → PID 신호 표(**PID 열·날짜·◀ 표시**) → 다른 프로세스 신호(참고용 분리) → 원본 액션 JSON. |
+| `_write_json_sidecar(action, md_path)` | `incident_*.json` (`schema: ransomguard.incident.v1`) — action+피해+MITRE+PID 신호. SIEM/SOAR 인제스트용. 실패해도 md 흐름은 막지 않음. |
 | `_notify_user(action, path)` | 백그라운드 스레드; 플랫폼별 디스패치. |
 | `_notify_linux` | `notify-send` subprocess. |
 | `_notify_macos` | `osascript -e 'display notification …'`. |
