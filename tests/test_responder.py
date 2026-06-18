@@ -483,7 +483,6 @@ class TestKillWithPsutil:
 
 
 # ---------------------------------------------------------------------------
-<<<<<<< HEAD
 # Action-time forensic context capture (보고서 자기모순 방지 — RustyStealer PDF)
 # ---------------------------------------------------------------------------
 
@@ -514,6 +513,10 @@ class TestActionTimeContext:
                                 minifilter=FakeMinifilter(),
                                 on_action=actions.append)
         resp.attach()
+        # corroborated precise-kill 정책: 단독 HIGH 는 관찰만 하므로,
+        # 독립적인 암호화 정황(pid 없음)을 먼저 깔아 행동을 성립시킨다.
+        engine.submit(_make_signal("magic_bytes_lost",
+                                   metadata={"path": "a.docx"}))
         sig = _make_signal("kernel_rename_burst", metadata={"pid": 99999})
         engine.submit(sig)
         assert actions, "quarantine action should have been reported"
@@ -521,7 +524,7 @@ class TestActionTimeContext:
         assert a.trigger_signal is not None
         assert a.trigger_signal["name"] == "kernel_rename_burst"
         assert a.detect_ts == sig.timestamp
-        assert a.score_at_action == 10
+        assert a.score_at_action == 20      # corroboration 10 + trigger 10
         assert a.level_at_action == "INFO"
 
     def test_forget_pid_after_terminated_kill(self):
@@ -530,13 +533,18 @@ class TestActionTimeContext:
         resp = ProcessResponder(engine, mode=ResponderMode.KILL,
                                 minifilter=FakeMinifilter())
         resp.attach()
+        # corroboration (pid 없음 → forget_pid 대상 아님)
+        engine.submit(_make_signal("magic_bytes_lost",
+                                   metadata={"path": "a.docx"}))
         # 존재하지 않는 pid → psutil.NoSuchProcess → terminated=True 처리
         engine.submit(_make_signal("kernel_rename_burst",
                                    metadata={"pid": 99999}))
         remaining = [s for s in engine.recent_signals(limit=50)
                      if (s.metadata or {}).get("pid") == 99999]
         assert remaining == [], "killed pid's signals must leave the window"
-=======
+
+
+# ---------------------------------------------------------------------------
 # Corroborated precise-kill policy (보고서 5-2)
 #
 # Regression guard: this policy was introduced in ab743d1 and accidentally
@@ -650,4 +658,3 @@ class TestCorroboratedKillPolicy:
         r._dispatch(sig, engine.current_score(), engine.current_level())
         assert killed == []
         assert r.actions(limit=5) == []
->>>>>>> master

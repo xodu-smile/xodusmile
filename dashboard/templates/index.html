@@ -4,6 +4,12 @@
 <meta charset="UTF-8">
 <title>RansomGuard · 랜섬웨어 보호 대시보드</title>
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<script>
+  // 테마를 스타일 파싱 전에 적용해 첫 페인트 깜빡임(FOUC)을 막는다.
+  // 기본은 다크 — SOC/관제 환경(저조도) 운영자가 1차 사용자.
+  document.documentElement.dataset.theme =
+    localStorage.getItem('rg.theme') || 'dark';
+</script>
 <style>
   :root {
     --bg:        #f3f5f9;
@@ -21,6 +27,9 @@
     --crit:      #dc2626;
     --med:       #ca8a04;
     --shadow:    0 1px 2px rgba(16,24,40,.04), 0 4px 14px rgba(16,24,40,.06);
+    --danger-soft:   #fdeded;
+    --threat-row-bg: #fff5f5;
+    --flash:         #dbeafe;
   }
 
   * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -222,7 +231,7 @@
   table.proc td { padding: 8px 12px; border-bottom: 1px solid var(--line-2); vertical-align: top; }
   table.proc tr:hover td { background: var(--card-2); }
   table.proc tr.new td { animation: flash 1.4s ease; }
-  @keyframes flash { 0%{ background:#dbeafe; } 100%{ background:transparent; } }
+  @keyframes flash { 0%{ background:var(--flash); } 100%{ background:transparent; } }
   td.name { font-weight: 600; }
   td.cmd {
     color: var(--ink-dim); font-size: 12px; max-width: 0;
@@ -409,6 +418,141 @@
   .allow-del { border: 1px solid var(--line); border-radius: 8px; padding: 4px 10px; font-size: 12px;
     color: var(--ink-dim); background: var(--card-2); cursor: pointer; white-space: nowrap; }
   .allow-del:hover { border-color: var(--crit); color: var(--crit); background: #fdeded; }
+
+  /* ---------- 헤더 도구 (전문가 컨트롤) ---------- */
+  .top-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .icon-btn {
+    border: 1px solid var(--line); background: var(--card);
+    color: var(--ink-dim); border-radius: 999px; padding: 7px 12px;
+    font-family: inherit; font-size: 13px; font-weight: 600; cursor: pointer;
+    box-shadow: var(--shadow); transition: all .15s;
+  }
+  .icon-btn:hover { border-color: var(--brand); color: var(--brand); }
+  .icon-btn.warn { border-color: var(--crit); color: var(--crit); animation: pulse 1.4s infinite; }
+  .status-pill.offline { border-color: var(--crit); color: var(--crit); }
+  .status-pill.offline .live-dot {
+    background: var(--crit); box-shadow: 0 0 0 3px rgba(220,38,38,.18); animation: none;
+  }
+
+  /* ---------- 위험도 스파크라인 ---------- */
+  .spark-wrap { margin-top: 14px; }
+  #score-spark { width: 100%; height: 64px; display: block; }
+  .spark-cap {
+    display: flex; justify-content: space-between; flex-wrap: wrap;
+    font-size: 11px; color: var(--ink-faint); margin-top: 4px;
+  }
+
+  /* ---------- 이벤트 필터 바 ---------- */
+  .ev-controls { display: flex; flex-wrap: wrap; gap: 7px; align-items: center; margin-bottom: 12px; }
+  .sev-toggle {
+    font-size: 11px; font-weight: 700; padding: 3px 9px; border-radius: 999px;
+    border: 1px solid var(--line); color: var(--ink-faint); cursor: pointer;
+    user-select: none; background: var(--card-2); transition: all .12s;
+  }
+  .sev-toggle.on[data-sev="CRITICAL"] { background:#fde7e7; color:var(--crit); border-color:var(--crit); }
+  .sev-toggle.on[data-sev="HIGH"]     { background:#ffece0; color:var(--high); border-color:var(--high); }
+  .sev-toggle.on[data-sev="MEDIUM"]   { background:#fdf3d6; color:#a16207;   border-color:var(--med); }
+  .sev-toggle.on[data-sev="LOW"]      { background:#e7f6ec; color:var(--ok);  border-color:var(--ok); }
+  .sev-toggle.on[data-sev="INFO"]     { background:var(--line-2); color:var(--ink-dim); border-color:var(--ink-faint); }
+  .ev-controls select, .ev-controls input {
+    background: var(--card-2); border: 1px solid var(--line); border-radius: 8px;
+    padding: 6px 9px; font-family: inherit; font-size: 12.5px; color: var(--ink);
+  }
+  .ev-controls input { flex: 1; min-width: 130px; }
+  .ev-controls input:focus, .ev-controls select:focus { outline: none; border-color: var(--brand); }
+  .btn.small { padding: 6px 11px; font-size: 12px; }
+  .btn.paused { border-color: var(--warn); color: var(--warn); }
+  .ev-raw { font-size: 10.5px; color: var(--ink-faint); white-space: nowrap; }
+
+  /* ---------- 대응 조치 로그 ---------- */
+  .action-row {
+    border: 1px solid var(--line); border-left: 4px solid var(--crit);
+    border-radius: 10px; padding: 11px 14px; margin-bottom: 9px; background: var(--card);
+  }
+  .action-row.quarantine { border-left-color: var(--warn); }
+  .action-row.fail { border-left-color: var(--ink-faint); }
+  .act-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+  .act-left { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; }
+  .act-chip {
+    font-size: 11px; font-weight: 700; padding: 2px 9px; border-radius: 999px;
+    background: #fde7e7; color: var(--crit); white-space: nowrap;
+  }
+  .action-row.quarantine .act-chip { background:#fdf3d6; color:#a16207; }
+  .action-row.fail .act-chip { background:var(--line-2); color:var(--ink-dim); }
+  .act-detail {
+    margin-top: 6px; font-size: 12px; color: var(--ink-dim);
+    display: flex; flex-wrap: wrap; gap: 4px 14px; word-break: break-all;
+  }
+  .act-detail .k { color: var(--ink-faint); }
+  .copy-btn {
+    border: 1px solid var(--line); background: var(--card-2); color: var(--ink-dim);
+    border-radius: 6px; padding: 0 6px; font-size: 11px; cursor: pointer; margin-left: 4px;
+  }
+  .copy-btn:hover { border-color: var(--brand); color: var(--brand); }
+  .vt-link { color: var(--brand); text-decoration: none; font-weight: 600; }
+  .vt-link:hover { text-decoration: underline; }
+
+  /* ---------- ATT&CK 요약 ---------- */
+  .att-sum-title { margin-top: 18px; }
+  .att-count { font-weight: 800; margin-left: 3px; }
+
+  /* ---------- 프로세스 정렬 / 위협 표시 ---------- */
+  table.proc th.sortable { cursor: pointer; user-select: none; }
+  table.proc th.sortable:hover { color: var(--brand); }
+  .sort-arrow { font-size: 10px; color: var(--brand); }
+  tr.threat-row td, table.proc tr.threat-row:hover td { background: var(--threat-row-bg); }
+  .score-badge {
+    font-size: 10.5px; font-weight: 800; color: var(--crit);
+    background: var(--danger-soft); border-radius: 999px; padding: 1px 7px; margin-left: 6px;
+  }
+
+  /* ---------- 다크(SOC) 테마 ----------
+     변수 오버라이드 + 라이트 고정색을 쓰는 컴포넌트별 보정.
+     구조(레이아웃/마크업)는 라이트와 완전히 동일하다. */
+  html[data-theme="dark"] {
+    --bg:#0a1020; --card:#101a2e; --card-2:#0c1526; --line:#23304b; --line-2:#1b2640;
+    --ink:#e2e8f0; --ink-dim:#94a3b8; --ink-faint:#5d6b82;
+    --brand:#60a5fa; --ok:#34d399; --warn:#fbbf24; --high:#fb923c; --crit:#f87171; --med:#eab308;
+    --shadow: 0 1px 2px rgba(0,0,0,.35), 0 4px 14px rgba(0,0,0,.35);
+    --danger-soft:#321318; --threat-row-bg:#221019; --flash:#1e3a5f;
+  }
+  html[data-theme="dark"] .hero.ok   { border-color:#1d4d31; background:linear-gradient(180deg,#0d2117,var(--card)); }
+  html[data-theme="dark"] .hero.warn { border-color:#6b5618; background:linear-gradient(180deg,#241d09,var(--card)); }
+  html[data-theme="dark"] .hero.high { border-color:#7c3a12; background:linear-gradient(180deg,#261409,var(--card)); }
+  html[data-theme="dark"] .hero.crit { border-color:#7f1d1d; background:linear-gradient(180deg,#290f12,var(--card)); }
+  html[data-theme="dark"] .sev-chip[data-sev="CRITICAL"],
+  html[data-theme="dark"] .verb-chip,
+  html[data-theme="dark"] .act-chip,
+  html[data-theme="dark"] .sev-toggle.on[data-sev="CRITICAL"] { background:#3a1518; color:#fca5a5; }
+  html[data-theme="dark"] .sev-chip[data-sev="HIGH"],
+  html[data-theme="dark"] .sev-toggle.on[data-sev="HIGH"] { background:#3a2410; color:#fdba74; }
+  html[data-theme="dark"] .sev-chip[data-sev="MEDIUM"],
+  html[data-theme="dark"] .report.quarantined .verb-chip,
+  html[data-theme="dark"] .action-row.quarantine .act-chip,
+  html[data-theme="dark"] .sev-toggle.on[data-sev="MEDIUM"] { background:#352a0c; color:#fde68a; }
+  html[data-theme="dark"] .sev-chip[data-sev="LOW"],
+  html[data-theme="dark"] .sev-toggle.on[data-sev="LOW"] { background:#10301f; color:#6ee7b7; }
+  html[data-theme="dark"] .sev-chip[data-sev="INFO"],
+  html[data-theme="dark"] .action-row.fail .act-chip { background:var(--line-2); color:var(--ink-dim); }
+  html[data-theme="dark"] .btn:hover { background:#16223c; }
+  html[data-theme="dark"] .btn.primary { background:#2563eb; border-color:#2563eb; color:#fff; }
+  html[data-theme="dark"] .btn.primary:hover { background:#1d4ed8; }
+  html[data-theme="dark"] .proc-controls input:focus,
+  html[data-theme="dark"] .allow-add input:focus { background:#0a1020; }
+  html[data-theme="dark"] .mode-btn.active { background:#16223c; }
+  html[data-theme="dark"] .mode-btn[data-mode="kill"].active { background:#321318; }
+  html[data-theme="dark"] .att-tag { background:#251c41; color:#c4b5fd; }
+  html[data-theme="dark"] .att-tag:hover { background:#2f2453; }
+  html[data-theme="dark"] .threat-kill:hover,
+  html[data-theme="dark"] .allow-del:hover { background:#321318; }
+  html[data-theme="dark"] .report-link:hover { background:#16223c; }
+  html[data-theme="dark"] .scroll::-webkit-scrollbar-thumb,
+  html[data-theme="dark"] .proc-scroll::-webkit-scrollbar-thumb,
+  html[data-theme="dark"] .modal-body::-webkit-scrollbar-thumb { background:#2c3a58; }
+  html[data-theme="dark"] .md code { color:#fdba74; }
+  html[data-theme="dark"] .allow-row .kind.path { background:#10301f; color:#6ee7b7; }
+  html[data-theme="dark"] .admin-card { border-color:#2c3a58; }
+  html[data-theme="dark"] .modal-overlay { background: rgba(2,6,16,.6); }
 </style>
 </head>
 <body>
@@ -420,8 +564,12 @@
       <small>랜섬웨어 실시간 보호 대시보드</small>
     </div>
   </div>
-  <div class="status-pill">
-    <span class="live-dot"></span> 실시간 감시 중 · <span class="clock" id="now">--:--:--</span>
+  <div class="top-actions">
+    <div class="status-pill" id="conn-pill">
+      <span class="live-dot"></span> <span id="conn-label">실시간 감시 중</span> · <span class="clock" id="now">--:--:--</span>
+    </div>
+    <button class="icon-btn" id="token-btn" title="운영자 API 토큰 설정 (X-API-Key) — 관리자 기능에 필요">🔑 토큰</button>
+    <button class="icon-btn" id="theme-toggle" title="다크/라이트 테마 전환">🌙</button>
   </div>
 </div>
 
@@ -470,6 +618,13 @@
     <span><b>100</b> 경고</span>
     <span><b>150</b> 위험·차단</span>
   </div>
+  <div class="spark-wrap">
+    <canvas id="score-spark" height="64"></canvas>
+    <div class="spark-cap">
+      <span>위험도 추이 — 최근 10분</span>
+      <span>점선: 임계값 60·100·150 · 새로고침 시 초기화</span>
+    </div>
+  </div>
   <div class="toolbar">
     <button class="btn" id="reset-btn">상태 초기화</button>
     <span class="hint" style="align-self:center;">위험도 점수와 최근 활동 표시를 0으로 되돌립니다 · 차단·격리 기록은 유지</span>
@@ -480,6 +635,16 @@
 <div class="body-grid">
   <div class="card">
     <div class="card-title">최근 활동 <span class="hint">— 탐지 엔진이 포착한 사건 기록</span></div>
+    <div class="ev-controls">
+      <span class="sev-toggle" data-sev="CRITICAL" title="위험">CRITICAL</span>
+      <span class="sev-toggle" data-sev="HIGH" title="경고">HIGH</span>
+      <span class="sev-toggle" data-sev="MEDIUM" title="주의">MEDIUM</span>
+      <span class="sev-toggle" data-sev="LOW" title="낮음">LOW</span>
+      <span class="sev-toggle" data-sev="INFO" title="정보">INFO</span>
+      <select id="ev-detector"><option value="">모든 탐지기</option></select>
+      <input type="text" id="ev-search" placeholder="검색: 메시지·신호·메타데이터" autocomplete="off">
+      <button class="btn small" id="ev-pause" title="목록 갱신 일시정지 — 분석 중 새 이벤트에 밀리지 않게">⏸ 일시정지</button>
+    </div>
     <div class="scroll" id="events">
       <div class="empty">아직 기록된 활동이 없습니다.</div>
     </div>
@@ -488,6 +653,8 @@
   <div class="card">
     <div class="card-title">탐지 항목별 신호 <span class="hint">— 어떤 감시 기능이 반응했는지</span></div>
     <div class="chips" id="stats"></div>
+    <div class="card-title att-sum-title">MITRE ATT&amp;CK 기법 요약 <span class="hint">— 현재 탐지 윈도우의 기법 빈도</span></div>
+    <div class="att-tags" id="attack-summary"><span class="empty" style="padding:6px 0;">관측된 기법이 없습니다.</span></div>
     <div class="legend">
       <span>🟢 안전</span><span>🟡 주의</span><span>🟠 경고</span><span>🔴 위험</span>
     </div>
@@ -505,11 +672,11 @@
     <table class="proc">
       <thead>
         <tr>
-          <th style="width:70px;">PID</th>
-          <th style="width:180px;">이름</th>
+          <th style="width:70px;" class="sortable" data-sort="pid">PID <span class="sort-arrow"></span></th>
+          <th style="width:180px;" class="sortable" data-sort="name">이름 <span class="sort-arrow"></span></th>
           <th style="width:110px;">사용자</th>
-          <th style="width:70px;">CPU(%)</th>
-          <th style="width:90px;">메모리(MB)</th>
+          <th style="width:70px;" class="sortable" data-sort="cpu">CPU(%) <span class="sort-arrow"></span></th>
+          <th style="width:90px;" class="sortable" data-sort="mem">메모리(MB) <span class="sort-arrow"></span></th>
           <th>실행 명령어</th>
         </tr>
       </thead>
@@ -525,6 +692,14 @@
   <div class="card-title">차단·격리 기록 <span class="hint">— 자동 대응이 실행된 사건과 상세 보고서</span></div>
   <div class="scroll" id="reports-list">
     <div class="empty">차단·격리된 사건이 없습니다.</div>
+  </div>
+</div>
+
+<!-- ===== 대응 조치 로그 (감사 추적) ===== -->
+<div class="card proc-card">
+  <div class="card-title">대응 조치 로그 <span class="hint">— Response actions 감사 추적: 트리거 신호 · 이미지 해시 · 부모 프로세스 · 탐지→대응 지연</span></div>
+  <div class="scroll" id="actions-list">
+    <div class="empty">아직 대응 조치가 없습니다.</div>
   </div>
 </div>
 
@@ -598,7 +773,7 @@
 
 <div class="footer">
   <span>감시 기능: 미끼 파일 · 대량 파일 변경 · 의심 명령어 · 프로세스 감시</span>
-  <span>자동 새로고침: 상태 1.5초 · 프로세스 2초 · 기록 2.5초</span>
+  <span>자동 새로고침: 상태 1.5초 · 프로세스 2초 · 기록·조치 로그 2.5초</span>
 </div>
 
 <script>
@@ -664,7 +839,10 @@
   function fmtTime(ts) { return new Date(ts * 1000).toTimeString().slice(0,8); }
   function clockNow()  { return new Date().toTimeString().slice(0,8); }
   function escape(s) {
-    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    // 따옴표까지 인코딩 — 이스케이프 결과가 큰따옴표 속성(title="..." 등)에
+    // 들어가므로, 공격자가 cmdline/경로에 " 를 심어 속성을 탈출하지 못하게.
+    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+                    .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
   }
   function fmtFullTime(ts) {
     const d = new Date(ts * 1000);
@@ -672,6 +850,87 @@
     return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} `
          + `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
   }
+
+  // ---- 운영자 토큰 / 인증 fetch ----------------------------------------
+  // agent.auth_token 이 설정된 배포에서는 변경성/관리자 API 가 X-API-Key 를
+  // 요구한다.  토큰은 sessionStorage(탭 단위)에만 보관 — localStorage 에
+  // 남기면 노출 범위(다른 탭·재방문)가 불필요하게 넓어진다.
+  const tokenBtn = document.getElementById('token-btn');
+  const getToken = () => sessionStorage.getItem('rg.token') || '';
+  function setAuthWarn(on) {
+    tokenBtn.classList.toggle('warn', on);
+    tokenBtn.textContent = on ? '🔑 인증 필요' : '🔑 토큰';
+  }
+  // raw Response 를 그대로 반환 — .json()/.text() 소비자 양쪽과 호환되고,
+  // 호출부가 지정한 Content-Type 등 기존 헤더는 스프레드로 보존한다.
+  function authFetch(url, opts = {}) {
+    const headers = { ...(opts.headers || {}) };
+    const t = getToken();
+    if (t) headers['X-API-Key'] = t;
+    return fetch(url, { ...opts, headers }).then(res => {
+      if (res.status === 401) setAuthWarn(true);
+      else if (res.ok && t) setAuthWarn(false);
+      return res;
+    });
+  }
+  tokenBtn.addEventListener('click', () => {
+    const v = prompt('운영자 API 토큰 (X-API-Key)\n빈 값으로 확인하면 토큰을 지웁니다.', getToken());
+    if (v === null) return;                       // 취소
+    const t = v.trim();
+    if (t) sessionStorage.setItem('rg.token', t);
+    else sessionStorage.removeItem('rg.token');
+    setAuthWarn(false);
+    tick();
+    if (adminOpen) adminTick();
+  });
+
+  // ---- 연결 상태 표시 ---------------------------------------------------
+  const connPill  = document.getElementById('conn-pill');
+  const connLabel = document.getElementById('conn-label');
+  let pollFails = 0;
+  function markPoll(ok) {
+    pollFails = ok ? 0 : pollFails + 1;
+    const off = pollFails >= 2;                   // 일시적 1회 실패는 무시
+    connPill.classList.toggle('offline', off);
+    connLabel.textContent = !off ? '실시간 감시 중'
+      : tokenBtn.classList.contains('warn') ? '읽기 인증 필요' : '에이전트 연결 끊김';
+  }
+
+  // ---- 테마 전환 ---------------------------------------------------------
+  const themeBtn = document.getElementById('theme-toggle');
+  function applyThemeIcon() {
+    themeBtn.textContent = document.documentElement.dataset.theme === 'dark' ? '☀' : '🌙';
+  }
+  themeBtn.addEventListener('click', () => {
+    const next = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+    document.documentElement.dataset.theme = next;
+    localStorage.setItem('rg.theme', next);
+    applyThemeIcon();
+    drawSpark();                                  // 테마 색으로 다시 그림
+  });
+  applyThemeIcon();
+
+  // ---- 클립보드 복사 (위임: 해시·경로 복사 버튼) -------------------------
+  document.addEventListener('click', (e) => {
+    const btn = e.target.closest('button[data-copy]');
+    if (!btn) return;
+    const value = btn.dataset.copy || '';
+    const done = () => {
+      const prev = btn.textContent;
+      btn.textContent = '✓';
+      setTimeout(() => { btn.textContent = prev; }, 900);
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(value).then(done).catch(() => {});
+    } else {
+      // 비보안 컨텍스트(http 원격 접속) 폴백
+      const ta = document.createElement('textarea');
+      ta.value = value; document.body.appendChild(ta);
+      ta.select();
+      try { document.execCommand('copy'); done(); } catch (_) {}
+      ta.remove();
+    }
+  });
 
   // ---- 상태/이벤트/통계 -----------------------------------------------
   function applyLevel(level) {
@@ -682,9 +941,81 @@
     elHeroDesc.textContent  = info.desc;
   }
 
-  function renderEvents(events) {
+  // ---- 이벤트 필터/검색/일시정지 ----------------------------------------
+  const evFilter = { sev: new Set(), det: '', q: '' };
+  let evPaused = false;
+  let lastEvents = [];          // 마지막 수신 스냅샷 (필터 재적용용)
+  let pausedEvents = null;      // 일시정지 시점에 고정된 목록
+  let pausedAt = 0;
+  const evDetSel   = document.getElementById('ev-detector');
+  const evSearch   = document.getElementById('ev-search');
+  const evPauseBtn = document.getElementById('ev-pause');
+  const seenDetectors = new Set();
+
+  function matchesFilter(e) {
+    if (evFilter.sev.size && !evFilter.sev.has(e.severity)) return false;
+    if (evFilter.det && e.detector !== evFilter.det) return false;
+    if (evFilter.q) {
+      const hay = ((e.message || '') + ' ' + (e.detector || '') + ' ' + (e.name || '')
+                 + ' ' + JSON.stringify(e.metadata || {})).toLowerCase();
+      if (!hay.includes(evFilter.q)) return false;
+    }
+    return true;
+  }
+
+  function renderEventsFiltered() {
+    // 일시정지는 이벤트 목록만 동결한다 — 점수/게이지/스파크라인은 계속 갱신.
+    const src = evPaused ? (pausedEvents || []) : lastEvents;
+    if (evPaused) {
+      const fresh = lastEvents.filter(e => e.timestamp > pausedAt).length;
+      evPauseBtn.textContent = fresh ? `▶ 재개 (신규 ${fresh})` : '▶ 재개';
+    }
+    renderEvents(src.filter(matchesFilter), src.length);
+  }
+
+  function refreshDetectorOptions(evts) {
+    let added = false;
+    for (const e of evts) {
+      if (e.detector && !seenDetectors.has(e.detector)) {
+        seenDetectors.add(e.detector); added = true;
+      }
+    }
+    if (!added) return;
+    const cur = evDetSel.value;   // 재구성 시 선택 보존
+    evDetSel.innerHTML = '<option value="">모든 탐지기</option>'
+      + [...seenDetectors].sort().map(d =>
+          `<option value="${escape(d)}">${escape(detKo(d))} (${escape(d)})</option>`).join('');
+    evDetSel.value = cur;
+  }
+
+  document.querySelectorAll('.sev-toggle').forEach(chip => {
+    chip.addEventListener('click', () => {
+      const sev = chip.dataset.sev;
+      if (evFilter.sev.has(sev)) evFilter.sev.delete(sev);
+      else evFilter.sev.add(sev);
+      chip.classList.toggle('on', evFilter.sev.has(sev));
+      renderEventsFiltered();
+    });
+  });
+  evDetSel.addEventListener('change', () => {
+    evFilter.det = evDetSel.value; renderEventsFiltered();
+  });
+  evSearch.addEventListener('input', () => {
+    evFilter.q = evSearch.value.trim().toLowerCase(); renderEventsFiltered();
+  });
+  evPauseBtn.addEventListener('click', () => {
+    evPaused = !evPaused;
+    evPauseBtn.classList.toggle('paused', evPaused);
+    if (evPaused) { pausedEvents = lastEvents.slice(); pausedAt = Date.now() / 1000; }
+    else { pausedEvents = null; evPauseBtn.textContent = '⏸ 일시정지'; }
+    renderEventsFiltered();
+  });
+
+  function renderEvents(events, total) {
     if (!events.length) {
-      elEvents.innerHTML = '<div class="empty">아직 기록된 활동이 없습니다.</div>';
+      elEvents.innerHTML = '<div class="empty">'
+        + (total ? '필터와 일치하는 활동이 없습니다.' : '아직 기록된 활동이 없습니다.')
+        + '</div>';
       return;
     }
     elEvents.innerHTML = events.map(e => {
@@ -699,10 +1030,11 @@
         <div class="event" data-sev="${escape(e.severity)}">
           <div class="event-head">
             <div class="event-left">
-              <span class="sev-chip" data-sev="${escape(e.severity)}">${sevKo(e.severity)}</span>
+              <span class="sev-chip" data-sev="${escape(e.severity)}" title="${sevKo(e.severity)}">${escape(e.severity)}</span>
               <span class="event-det">${escape(detKo(e.detector))}</span>
+              <span class="ev-raw mono">${escape(e.detector)}${e.name ? '/' + escape(e.name) : ''}</span>
             </div>
-            <span class="event-time mono">${fmtTime(e.timestamp)}</span>
+            <span class="event-time mono" title="${fmtFullTime(e.timestamp)}">${fmtTime(e.timestamp)}</span>
           </div>
           <div class="event-msg">${escape(e.message)}</div>
           ${att ? `<div class="att-tags">${att}</div>` : ''}
@@ -720,12 +1052,84 @@
     elSignals.textContent = stats.total || 0;
   }
 
+  // ---- MITRE ATT&CK 기법 요약 (필터와 무관하게 전체 윈도우 기준) --------
+  const attackSummary = document.getElementById('attack-summary');
+  function renderAttackSummary(evts) {
+    const agg = new Map();
+    for (const e of evts) {
+      for (const a of (e.attack || [])) {
+        const cur = agg.get(a.id);
+        if (cur) cur.count++;
+        else agg.set(a.id, { ...a, count: 1 });
+      }
+    }
+    if (!agg.size) {
+      attackSummary.innerHTML =
+        '<span class="empty" style="padding:6px 0;">관측된 기법이 없습니다.</span>';
+      return;
+    }
+    attackSummary.innerHTML = [...agg.values()]
+      .sort((x, y) => y.count - x.count)
+      .map(a => `<a class="att-tag" href="${escape(a.url)}" target="_blank" rel="noopener"
+          title="${escape(a.tactic_ko)} (${escape(a.tactic)})">${escape(a.id)} ${escape(a.name)}<span class="att-count">×${a.count}</span></a>`)
+      .join('');
+  }
+
+  // ---- 위험도 스파크라인 (외부 라이브러리 없음 — 오프라인 동작 유지) ----
+  const sparkCanvas = document.getElementById('score-spark');
+  const sparkData = [];                  // {t, score} — 1.5s 간격, 400개 ≈ 10분
+  const SPARK_MAX_SAMPLES = 400;
+  function pushSpark(score) {
+    sparkData.push({ t: Date.now() / 1000, score });
+    if (sparkData.length > SPARK_MAX_SAMPLES) sparkData.shift();
+    drawSpark();
+  }
+  function cssVar(name) {
+    return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  }
+  function drawSpark() {
+    const dpr = window.devicePixelRatio || 1;
+    const w = sparkCanvas.clientWidth, h = sparkCanvas.clientHeight;
+    if (!w || !h) return;
+    sparkCanvas.width = w * dpr; sparkCanvas.height = h * dpr;
+    const ctx = sparkCanvas.getContext('2d');
+    ctx.scale(dpr, dpr);
+    ctx.clearRect(0, 0, w, h);
+    const max = Math.max(BAR_MAX, ...sparkData.map(p => p.score)) * 1.05;
+    const y = v => h - (v / max) * (h - 6) - 3;
+    // 임계값 가이드라인 60/100/150
+    ctx.setLineDash([3, 4]); ctx.lineWidth = 1; ctx.globalAlpha = .5;
+    for (const [v, c] of [[60, '--med'], [100, '--high'], [150, '--crit']]) {
+      ctx.strokeStyle = cssVar(c);
+      ctx.beginPath(); ctx.moveTo(0, y(v)); ctx.lineTo(w, y(v)); ctx.stroke();
+    }
+    ctx.setLineDash([]); ctx.globalAlpha = 1;
+    if (sparkData.length < 2) return;
+    const t1 = sparkData[sparkData.length - 1].t;
+    const t0 = Math.max(sparkData[0].t, t1 - 600);      // 최근 10분 창
+    const x = t => ((t - t0) / Math.max(1, t1 - t0)) * w;
+    const line = cssVar('--brand');
+    ctx.beginPath();
+    sparkData.forEach((p, i) =>
+      i ? ctx.lineTo(x(p.t), y(p.score)) : ctx.moveTo(x(p.t), y(p.score)));
+    ctx.strokeStyle = line; ctx.lineWidth = 1.6; ctx.stroke();
+    ctx.lineTo(x(t1), h); ctx.lineTo(x(sparkData[0].t), h); ctx.closePath();
+    ctx.globalAlpha = .12; ctx.fillStyle = line; ctx.fill(); ctx.globalAlpha = 1;
+    const last = sparkData[sparkData.length - 1];
+    ctx.beginPath(); ctx.arc(x(last.t), y(last.score), 2.5, 0, Math.PI * 2);
+    ctx.fillStyle = line; ctx.fill();
+  }
+  window.addEventListener('resize', drawSpark);
+
   async function tick() {
     elNow.textContent = clockNow();
     try {
       const [statusRes, eventsRes] = await Promise.all([
-        fetch('/api/status'), fetch('/api/events')
+        authFetch('/api/status'), authFetch('/api/events')
       ]);
+      // 401(읽기 보호) 등 오류 본문을 정상 상태로 렌더하지 않는다 —
+      // "안전"으로 멈춰 보이는 것보다 연결 경고가 낫다.
+      if (!statusRes.ok || !eventsRes.ok) throw new Error('http ' + statusRes.status);
       const status = await statusRes.json();
       const evts = (await eventsRes.json()).events;
 
@@ -738,14 +1142,19 @@
       elGaugeWord.textContent = w.t;
       elGaugeWord.style.color = w.c;
 
-      renderEvents(evts);
+      pushSpark(status.score);
+      lastEvents = evts;
+      refreshDetectorOptions(evts);
+      renderEventsFiltered();
+      renderAttackSummary(evts);
       renderStats(status.stats || {});
-    } catch (e) { /* 네트워크 실패는 조용히 무시 */ }
+      markPoll(true);
+    } catch (e) { markPoll(false); }
   }
 
   btnReset.addEventListener('click', async () => {
     if (!confirm('위험도 점수와 최근 활동 표시를 초기화할까요?\n(차단·격리 기록은 그대로 유지됩니다)')) return;
-    await fetch('/api/reset', { method: 'POST' });
+    await authFetch('/api/reset', { method: 'POST' });
     tick();
   });
 
@@ -765,24 +1174,56 @@
     renderProcs(window.__lastProcs || []);
   });
 
+  // ---- 컬럼 정렬 + 위협 기여 PID 하이라이트 ----------------------------
+  let procSortKey = null, procSortDir = 1;
+  let threatByPid = {};          // adminTick(위협 분석)이 갱신: pid -> 기여 점수
+  const PROC_SORT = {
+    pid:  p => p.pid,
+    name: p => (p.name || '').toLowerCase(),
+    cpu:  p => p.cpu_percent ?? 0,
+    mem:  p => p.rss_mb ?? 0,
+  };
+  document.querySelectorAll('table.proc th.sortable').forEach(th => {
+    th.addEventListener('click', () => {
+      const key = th.dataset.sort;
+      if (procSortKey === key) procSortDir = -procSortDir;
+      else {
+        procSortKey = key;
+        // 수치 자원 컬럼은 내림차순(상위 소비자 우선)이 분석 기본값.
+        procSortDir = (key === 'cpu' || key === 'mem') ? -1 : 1;
+      }
+      document.querySelectorAll('table.proc .sort-arrow').forEach(s => s.textContent = '');
+      th.querySelector('.sort-arrow').textContent = procSortDir > 0 ? '▲' : '▼';
+      renderProcs(window.__lastProcs || []);
+    });
+  });
+
   function renderProcs(procs) {
     window.__lastProcs = procs;
     procCount.textContent = procs.length;
-    const filtered = filterStr
+    let rows = filterStr
       ? procs.filter(p => (p.name || '').toLowerCase().includes(filterStr)
                        || (p.cmdline || '').toLowerCase().includes(filterStr))
       : procs;
-    if (!filtered.length) {
+    if (procSortKey) {
+      const get = PROC_SORT[procSortKey];
+      rows = rows.slice().sort((a, b) => {
+        const va = get(a), vb = get(b);
+        return (va < vb ? -1 : va > vb ? 1 : 0) * procSortDir;
+      });
+    }
+    if (!rows.length) {
       procBody.innerHTML = '<tr><td colspan="6" style="text-align:center; '
         + 'color:var(--ink-faint); padding:24px;">'
         + (filterStr ? '검색 결과가 없습니다.' : '표시할 프로세스가 없습니다.') + '</td></tr>';
       return;
     }
-    procBody.innerHTML = filtered.map(p => {
+    procBody.innerHTML = rows.map(p => {
       const isNew = !firstProcTick && !knownPids.has(p.pid);
-      return `<tr class="${isNew ? 'new' : ''}">
+      const thr = threatByPid[p.pid];
+      return `<tr class="${isNew ? 'new' : ''}${thr ? ' threat-row' : ''}">
         <td class="num mono" title="부모 PID: ${p.ppid}">${p.pid}</td>
-        <td class="name">${escape(p.name || '?')}</td>
+        <td class="name">${escape(p.name || '?')}${thr ? `<span class="score-badge" title="위협 점수 기여 (위협 분석 패널 참조)">+${thr}</span>` : ''}</td>
         <td>${escape(p.user || '')}</td>
         <td class="num mono">${(p.cpu_percent ?? 0).toFixed(1)}</td>
         <td class="num mono">${(p.rss_mb ?? 0).toFixed(1)}</td>
@@ -793,13 +1234,15 @@
 
   async function procTick() {
     try {
-      const res = await fetch('/api/processes');
+      const res = await authFetch('/api/processes');
+      if (!res.ok) throw new Error('http ' + res.status);
       const procs = (await res.json()).processes || [];
       renderProcs(procs);
       knownPids.clear();
       procs.forEach(p => knownPids.add(p.pid));
       firstProcTick = false;
-    } catch (e) { /* silent */ }
+      markPoll(true);
+    } catch (e) { markPoll(false); }
   }
   procTick();
   setInterval(procTick, 2000);
@@ -964,7 +1407,7 @@
     modalBody.innerHTML = '<p style="color:var(--ink-dim)">불러오는 중…</p>';
     openModal();
     try {
-      const res = await fetch(href);
+      const res = await authFetch(href);
       const text = await res.text();
       modalBody.innerHTML = renderMarkdown(text);
     } catch (err) {
@@ -1004,10 +1447,81 @@
     }, 10000);
   }
 
+  // ---- 대응 조치 로그 (감사 추적) ---------------------------------------
+  // /api/actions 의 항목은 KillAction.to_dict() — terminated/quarantined/error
+  // 로 성패·동사를 파생한다 (별도 success/action 필드 없음).  release 는
+  // 조치 로그에 기록되지 않는다.
+  const actionsList = document.getElementById('actions-list');
+  function renderActions(acts) {
+    if (!acts.length) {
+      actionsList.innerHTML = '<div class="empty">아직 대응 조치가 없습니다.</div>';
+      return;
+    }
+    actionsList.innerHTML = acts.map(a => {
+      const failed = !!a.error || (a.mode === 'kill' && !a.terminated && !a.quarantined);
+      const verb = failed ? '실패' : a.terminated ? '강제 종료' : a.quarantined ? '격리' : '기록';
+      const cls  = failed ? 'fail' : a.terminated ? '' : 'quarantine';
+      const lat  = (a.detect_ts && a.timestamp) ? (a.timestamp - a.detect_ts) : null;
+      const sha  = (a.exe_sha256 || '').toLowerCase();
+      const shaOk = /^[0-9a-f]{64}$/.test(sha);   // hex 검증된 값만 외부 링크에 사용
+      const trig = a.trigger_signal
+        ? `${a.trigger_signal.detector || '?'}/${a.trigger_signal.name || '?'}` : '';
+      // 같은 PID, ±10분 이내의 인시던트 보고서 딥링크 (있으면)
+      const rep = (window.__lastReports || []).find(r =>
+        r.pid === a.pid && Math.abs(r.timestamp - a.timestamp) < 600);
+      const repLink = rep
+        ? ` · <a class="vt-link" href="/api/reports/${encodeURIComponent(rep.filename)}"
+              data-report="${escape(rep.filename)}" data-name="${escape(a.process_name || '')}"
+              data-pid="${a.pid}">보고서</a>` : '';
+      const detail = [];
+      if (a.username)
+        detail.push(`<span><span class="k">계정</span> ${escape(a.username)}</span>`);
+      if (a.score_at_action != null)
+        detail.push(`<span><span class="k">조치 시점</span> ${a.score_at_action}점`
+          + (a.level_at_action ? ` (${escape(a.level_at_action)})` : '') + `</span>`);
+      if (lat != null && lat >= 0)
+        detail.push(`<span><span class="k">탐지→대응</span> ${lat.toFixed(2)}s</span>`);
+      if (trig)
+        detail.push(`<span><span class="k">트리거</span> <span class="mono">${escape(trig)}</span></span>`);
+      if (a.ppid != null)
+        detail.push(`<span><span class="k">부모</span> ${escape(a.parent_name || '?')} <span class="mono">(PPID ${a.ppid})</span></span>`);
+      if (a.exe_path)
+        detail.push(`<span><span class="k">이미지</span> <span class="mono">${escape(a.exe_path)}</span>`
+          + `<button class="copy-btn" data-copy="${escape(a.exe_path)}" title="경로 복사">📋</button></span>`);
+      if (sha)
+        detail.push(`<span><span class="k">SHA-256</span> <span class="mono" title="${escape(sha)}">${escape(sha.slice(0, 12))}…</span>`
+          + `<button class="copy-btn" data-copy="${escape(sha)}" title="해시 복사">📋</button>`
+          + (shaOk ? ` <a class="vt-link" href="https://www.virustotal.com/gui/file/${sha}" target="_blank" rel="noopener" title="VirusTotal 조회">VT</a>` : '')
+          + `</span>`);
+      if (a.error)
+        detail.push(`<span><span class="k">오류</span> ${escape(a.error)}</span>`);
+      return `
+        <div class="action-row ${cls}">
+          <div class="act-head">
+            <div class="act-left">
+              <span class="act-chip">${verb}</span>
+              <span class="report-name">${escape(a.process_name || '?')}</span>
+              <span class="report-sub mono">PID ${a.pid}</span>
+              <span class="report-sub"><span class="k">사유</span> <span class="mono">${escape(a.reason || '')}</span>${repLink}</span>
+            </div>
+            <span class="event-time mono">${fmtFullTime(a.timestamp)}</span>
+          </div>
+          ${detail.length ? `<div class="act-detail">${detail.join('')}</div>` : ''}
+        </div>`;
+    }).join('');
+  }
+
   async function reportsTick() {
     try {
-      const reports = (await (await fetch('/api/reports')).json()).reports || [];
+      const [rRes, aRes] = await Promise.all([
+        authFetch('/api/reports'), authFetch('/api/actions'),
+      ]);
+      if (!rRes.ok || !aRes.ok) throw new Error('http ' + rRes.status);
+      const reports = (await rRes.json()).reports || [];
+      window.__lastReports = reports;   // 조치 로그의 보고서 딥링크 매칭용
       renderReports(reports);
+      renderActions(((await aRes.json()).actions || []).slice().reverse());
+      markPoll(true);
 
       // 대시보드를 처음 열었을 때 이전 사건으로 토스트가 쏟아지지 않도록
       // 첫 틱에서는 기존 기록만 '본 것'으로 등록한다.
@@ -1025,7 +1539,7 @@
           console.warn(`이번 주기에 ${fresh.length - 3}건의 사건이 더 있습니다 — 차단·격리 기록을 확인하세요.`);
         }
       }
-    } catch (e) { /* silent */ }
+    } catch (e) { markPoll(false); }
   }
   reportsTick();
   setInterval(reportsTick, 2500);
@@ -1084,7 +1598,7 @@
     const mode = btn.dataset.mode;
     if (mode === 'kill' && !confirm('자동 “강제 종료” 모드로 전환할까요?\n위협으로 판정된 프로세스가 즉시 종료됩니다.')) return;
     try {
-      const res = await fetch('/api/admin/mode', {
+      const res = await authFetch('/api/admin/mode', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ mode }),
       });
@@ -1096,6 +1610,10 @@
 
   function renderThreats(data) {
     const rows = (data.threats || []).filter(t => t.score > 0);
+    // 프로세스 테이블의 위협 하이라이트 동기화 (pid -> 기여 점수)
+    threatByPid = {};
+    for (const t of rows) if (t.pid) threatByPid[t.pid] = t.score;
+    renderProcs(window.__lastProcs || []);
     if (!rows.length) {
       threatsList.innerHTML = '<div class="empty" style="padding:14px 0;">'
         + '현재 위험 점수를 올리는 프로세스가 없습니다.</div>';
@@ -1132,7 +1650,7 @@
     const pid = btn.dataset.kill;
     if (!confirm(`PID ${pid} 프로세스를 수동으로 종료할까요?`)) return;
     try {
-      await fetch('/api/kill', {
+      await authFetch('/api/kill', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ pid: Number(pid), reason: 'manual-admin-panel' }),
       });
@@ -1162,7 +1680,7 @@
     const value = (allowValue.value || '').trim();
     if (!value) { allowValue.focus(); return; }
     try {
-      const res = await fetch('/api/admin/allowlist', {
+      const res = await authFetch('/api/admin/allowlist', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ value, note: (allowNote.value || '').trim() }),
       });
@@ -1179,7 +1697,7 @@
     const btn = e.target.closest('button[data-val]');
     if (!btn) return;
     try {
-      const res = await fetch('/api/admin/allowlist', {
+      const res = await authFetch('/api/admin/allowlist', {
         method: 'DELETE', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ value: btn.dataset.val, kind: btn.dataset.kind }),
       });
@@ -1192,9 +1710,12 @@
     if (!adminOpen) return;
     try {
       const [hRes, tRes, aRes] = await Promise.all([
-        fetch('/api/admin/health'), fetch('/api/admin/threats'),
-        fetch('/api/admin/allowlist'),
+        authFetch('/api/admin/health'), authFetch('/api/admin/threats'),
+        authFetch('/api/admin/allowlist'),
       ]);
+      // 401(토큰 미설정/오류) 본문을 패널에 렌더하지 않는다 — authFetch 가
+      // 헤더의 토큰 버튼을 경고 상태로 바꿔 원인을 알린다.
+      if (!hRes.ok || !tRes.ok || !aRes.ok) return;
       renderHealth(await hRes.json());
       renderThreats(await tRes.json());
       renderAllowlist((await aRes.json()).entries || []);
