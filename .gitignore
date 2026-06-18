@@ -5,6 +5,8 @@
 #  로컬 빌드한다.
 # =====================================================================
 .omc/
+# fp_fn_benchmark 시나리오 임시 작업 폴더 (런마다 생성/정리)
+_fpfn_work/
 # ── Python ──────────────────────────────────────────────────────────
 .venv/
 venv/
@@ -20,7 +22,21 @@ __pycache__/
 *.db-journal
 reports/
 testsign_result.txt
-.lab.json          # lab.ps1 로컬 설정 (watch 경로 등) — 머신마다 다름
+# lab.ps1 로컬 설정 (watch 경로 등) — 머신마다 다름
+.lab.json
+
+# 실검체 랩 테스트 중 랜섬웨어가 암호화한 산출물 (절대 커밋 금지)
+*.eight
+*.locked
+*.encrypted
+detector.db.id*
+
+# 대용량 PPT/DOCX 산출물·템플릿 — 리포에서 제외 (별도 공유, 스크립트로 재생성)
+*.pptx
+*.docx
+
+# 빈 테스트 감시 폴더 (런타임 생성)
+test_watch_dir/
 
 # ── 커널 드라이버 빌드 산출물 (아키텍처 고유 — 로컬 빌드할 것) ──────
 #  build/x64/... 와 build/ARM64/... 의 .sys/.cat 은 서로 호환되지 않음.

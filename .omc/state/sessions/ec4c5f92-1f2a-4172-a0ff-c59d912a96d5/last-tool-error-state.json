@@ -1,7 +1,0 @@
-{
-  "tool_name": "mcp__plugin_oh-my-claudecode_t__lsp_diagnostics",
-  "tool_input_preview": "{\"file\":\"/home/namaek2/ransomware_detector/attack_map.py\"}",
-  "error": "Language server 'ty' not found.\nInstall with: Install ty from https://github.com/astral-sh/ty",
-  "timestamp": "2026-06-08T17:36:40.071Z",
-  "retry_count": 4
-}
